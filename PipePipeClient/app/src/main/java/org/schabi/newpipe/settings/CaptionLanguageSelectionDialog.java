@@ -17,6 +17,7 @@ import androidx.annotation.Nullable;
 import androidx.appcompat.app.AlertDialog;
 import androidx.fragment.app.DialogFragment;
 import androidx.preference.PreferenceManager;
+import androidx.recyclerview.widget.DiffUtil;
 import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 
@@ -49,7 +50,7 @@ public class CaptionLanguageSelectionDialog extends DialogFragment {
     @Override
     @SuppressWarnings("deprecation")
     public Dialog onCreateDialog(@Nullable final Bundle savedInstanceState) {
-        final View view = LayoutInflater.from(requireContext())
+        final View view = getLayoutInflater()
                 .inflate(R.layout.dialog_caption_language_selection, null);
 
         vocabulary = CaptionLanguageFilter.buildVocabulary(
@@ -175,8 +176,11 @@ public class CaptionLanguageSelectionDialog extends DialogFragment {
         private List<LanguageEntry> visibleEntries = rebuild(null);
 
         void setFilter(@Nullable final String query) {
-            visibleEntries = rebuild(query);
-            notifyDataSetChanged();
+            final List<LanguageEntry> updated = rebuild(query);
+            final DiffUtil.DiffResult diff = DiffUtil.calculateDiff(
+                    new LanguageDiffCallback(visibleEntries, updated));
+            visibleEntries = updated;
+            diff.dispatchUpdatesTo(this);
         }
 
         @Nullable
@@ -214,6 +218,41 @@ public class CaptionLanguageSelectionDialog extends DialogFragment {
         @Override
         public int getItemCount() {
             return visibleEntries.size();
+        }
+    }
+
+    private static class LanguageDiffCallback extends DiffUtil.Callback {
+        private final List<LanguageEntry> oldEntries;
+        private final List<LanguageEntry> newEntries;
+
+        LanguageDiffCallback(final List<LanguageEntry> oldEntries,
+                             final List<LanguageEntry> newEntries) {
+            this.oldEntries = oldEntries;
+            this.newEntries = newEntries;
+        }
+
+        @Override
+        public int getOldListSize() {
+            return oldEntries.size();
+        }
+
+        @Override
+        public int getNewListSize() {
+            return newEntries.size();
+        }
+
+        @Override
+        public boolean areItemsTheSame(final int oldPosition, final int newPosition) {
+            return oldEntries.get(oldPosition).code
+                    .equals(newEntries.get(newPosition).code);
+        }
+
+        @Override
+        public boolean areContentsTheSame(final int oldPosition, final int newPosition) {
+            final LanguageEntry oldEntry = oldEntries.get(oldPosition);
+            final LanguageEntry newEntry = newEntries.get(newPosition);
+            return oldEntry.code.equals(newEntry.code)
+                    && oldEntry.name.equals(newEntry.name);
         }
     }
 
