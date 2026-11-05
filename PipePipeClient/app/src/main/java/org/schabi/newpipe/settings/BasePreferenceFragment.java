@@ -50,7 +50,7 @@ public abstract class BasePreferenceFragment extends PreferenceFragmentCompat {
     @NonNull
     public final Preference requirePreference(@StringRes final int resId) {
         final Preference preference = findPreference(getString(resId));
-        Objects.requireNonNull(preference);
-        return preference;
+        return Objects.requireNonNull(preference,
+                () -> "Missing preference for key resId=" + resId);
     }
 }

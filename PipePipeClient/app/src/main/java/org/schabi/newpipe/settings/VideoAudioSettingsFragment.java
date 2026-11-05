@@ -5,6 +5,7 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.os.Bundle;
 import android.provider.Settings;
+import android.text.TextUtils;
 import android.util.Log;
 import android.widget.Toast;
 
@@ -44,6 +45,7 @@ public class VideoAudioSettingsFragment extends BasePreferenceFragment {
     private static final int MAX_NAMES_IN_SUMMARY = 3;
 
     private List<LanguageEntry> captionLanguageVocabulary;
+    private Map<String, String> captionLanguageCodeToName;
 
     private SharedPreferences.OnSharedPreferenceChangeListener listener;
     private final CompositeDisposable disposables = new CompositeDisposable();
@@ -92,12 +94,19 @@ public class VideoAudioSettingsFragment extends BasePreferenceFragment {
      * summary. No stored selection (empty set) means all languages.
      */
     private void setupCaptionLanguageFilter() {
-        final MultiSelectListPreference preference =
-                (MultiSelectListPreference) requirePreference(
-                        R.string.caption_language_filter_key);
+        final Preference preference =
+                requirePreference(R.string.caption_language_filter_key);
+        if (!(preference instanceof MultiSelectListPreference)) {
+            throw new IllegalStateException(
+                    "caption_language_filter_key must be a MultiSelectListPreference");
+        }
+        final MultiSelectListPreference filterPreference =
+                (MultiSelectListPreference) preference;
         captionLanguageVocabulary = CaptionLanguageFilter.buildVocabulary(
                 Locale.getDefault(),
                 Arrays.asList(Locale.getAvailableLocales()));
+        captionLanguageCodeToName =
+                CaptionLanguageFilter.nameMap(captionLanguageVocabulary);
         final CharSequence[] entries =
                 new CharSequence[captionLanguageVocabulary.size()];
         final CharSequence[] entryValues =
@@ -107,14 +116,22 @@ public class VideoAudioSettingsFragment extends BasePreferenceFragment {
             entries[i] = entry.name;
             entryValues[i] = entry.code;
         }
-        preference.setEntries(entries);
-        preference.setEntryValues(entryValues);
-        updateCaptionLanguageFilterSummary(preference);
+        filterPreference.setEntries(entries);
+        filterPreference.setEntryValues(entryValues);
+        // Drop codes that no longer match the vocabulary (e.g. restored from
+        // a backup) so the dialog checkboxes reflect the effective filter.
+        final Set<String> normalizedStored =
+                CaptionLanguageFilter.normalizeSelection(filterPreference.getValues());
+        if (!normalizedStored.equals(filterPreference.getValues())) {
+            filterPreference.setValues(normalizedStored);
+        }
+        updateCaptionLanguageFilterSummary(filterPreference);
     }
 
     private void updateCaptionLanguageFilterSummary(
             final MultiSelectListPreference preference) {
-        if (!isAdded()) {
+        if (!isAdded() || captionLanguageVocabulary == null
+                || captionLanguageCodeToName == null) {
             return;
         }
         final Set<String> selected = CaptionLanguageFilter.normalizeSelection(
@@ -124,11 +141,11 @@ public class VideoAudioSettingsFragment extends BasePreferenceFragment {
             return;
         }
         final List<String> names = CaptionLanguageFilter.sortedDisplayNames(
-                selected,
-                CaptionLanguageFilter.nameMap(captionLanguageVocabulary),
+                selected, captionLanguageCodeToName,
                 Collator.getInstance(Locale.getDefault()));
         if (names.size() <= MAX_NAMES_IN_SUMMARY) {
-            preference.setSummary(android.text.TextUtils.join(", ", names));
+            preference.setSummary(TextUtils.join(
+                    getString(R.string.caption_language_filter_list_separator), names));
         } else {
             preference.setSummary(getResources().getQuantityString(
                     R.plurals.caption_language_filter_count, names.size(), names.size()));

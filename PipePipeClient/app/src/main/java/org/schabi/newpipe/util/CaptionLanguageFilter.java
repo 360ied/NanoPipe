@@ -14,6 +14,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.TreeMap;
 
@@ -45,8 +46,8 @@ public final class CaptionLanguageFilter {
         public final String name;
 
         public LanguageEntry(@NonNull final String code, @NonNull final String name) {
-            this.code = code;
-            this.name = name;
+            this.code = Objects.requireNonNull(code);
+            this.name = Objects.requireNonNull(name);
         }
     }
 
@@ -56,7 +57,9 @@ public final class CaptionLanguageFilter {
      * <p>Handles regional variants ({@code en-US}), underscore separators
      * ({@code en_US}), mixed case, and the legacy aliases {@code iw}/{@code in}/
      * {@code ji} (mapped to {@code he}/{@code id}/{@code yi}, matching their
-     * modern equivalents). Returns an empty string for null, blank, or
+     * modern equivalents). The undetermined tag {@code und} maps to empty
+     * because it names no language and can never be selected.
+     * Returns an empty string for null, blank, or
      * unparseable tags.</p>
      */
     @NonNull
@@ -81,6 +84,8 @@ public final class CaptionLanguageFilter {
                 return "id";
             case "ji":
                 return "yi";
+            case "und":
+                return "";
             default:
                 return primary;
         }
@@ -140,8 +145,7 @@ public final class CaptionLanguageFilter {
             return result;
         }
         for (final SubtitlesStream stream : subtitles) {
-            if (stream != null && normalized.contains(canonicalPrimaryCode(
-                    stream.getLanguageTag()))) {
+            if (stream != null && isTagAllowed(normalized, stream.getLanguageTag())) {
                 result.add(stream);
             }
         }
@@ -150,6 +154,9 @@ public final class CaptionLanguageFilter {
 
     /**
      * Primary subtag of a platform locale, lowercased.
+     *
+     * <p>The result is not vocabulary-safe on its own: pass it through
+     * {@link #canonicalPrimaryCode} to fold legacy aliases before use.</p>
      */
     @NonNull
     public static String primaryCodeOf(@Nullable final Locale locale) {
@@ -194,8 +201,8 @@ public final class CaptionLanguageFilter {
     public static List<LanguageEntry> buildVocabulary(
             @NonNull final Locale displayLocale,
             @Nullable final Collection<Locale> availableLocales) {
-        // TreeMap keyed by code deduplicates aliases that canonicalize
-        // to the same value (e.g. iw/he) regardless of iteration order.
+        // Keyed by code so aliases that canonicalize to the same value
+        // (e.g. iw/he) collapse into a single entry.
         final Map<String, String> codeToName = new TreeMap<>();
         if (availableLocales != null) {
             for (final Locale locale : availableLocales) {
@@ -231,7 +238,7 @@ public final class CaptionLanguageFilter {
                                        @NonNull final Locale displayLocale) {
         final String name = new Locale(code).getDisplayLanguage(displayLocale);
         if (name == null || name.isEmpty() || name.equals(code)) {
-            return code.toUpperCase(displayLocale);
+            return code.toUpperCase(Locale.ROOT);
         }
         return name;
     }
@@ -263,7 +270,7 @@ public final class CaptionLanguageFilter {
     @NonNull
     public static Map<String, String> nameMap(
             @NonNull final List<LanguageEntry> vocabulary) {
-        final Map<String, String> map = new HashMap<>(vocabulary.size() * 2);
+        final Map<String, String> map = new HashMap<>(vocabulary.size() + 1);
         for (final LanguageEntry entry : vocabulary) {
             map.put(entry.code, entry.name);
         }

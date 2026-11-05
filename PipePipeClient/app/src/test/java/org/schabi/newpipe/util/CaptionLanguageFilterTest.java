@@ -59,6 +59,9 @@ public class CaptionLanguageFilterTest {
         assertEquals("zh", CaptionLanguageFilter.canonicalPrimaryCode("zh-Hant"));
         assertEquals("he", CaptionLanguageFilter.canonicalPrimaryCode("iw"));
         assertEquals("he", CaptionLanguageFilter.canonicalPrimaryCode("he"));
+        assertEquals("he", CaptionLanguageFilter.canonicalPrimaryCode("iw-IL"));
+        assertEquals("id", CaptionLanguageFilter.canonicalPrimaryCode("in-ID"));
+        assertEquals("", CaptionLanguageFilter.canonicalPrimaryCode("und"));
         assertEquals("id", CaptionLanguageFilter.canonicalPrimaryCode("in"));
         assertEquals("id", CaptionLanguageFilter.canonicalPrimaryCode("id"));
         assertEquals("yi", CaptionLanguageFilter.canonicalPrimaryCode("ji"));
@@ -67,6 +70,53 @@ public class CaptionLanguageFilterTest {
         assertEquals("", CaptionLanguageFilter.canonicalPrimaryCode(""));
         assertEquals("", CaptionLanguageFilter.canonicalPrimaryCode("   "));
         assertEquals("", CaptionLanguageFilter.canonicalPrimaryCode("-US"));
+        assertEquals("en", CaptionLanguageFilter.canonicalPrimaryCode(" en-US "));
+        assertEquals("en", CaptionLanguageFilter.canonicalPrimaryCode("EN_us"));
+    }
+
+    @Test
+    public void isTagAllowedCoversEmptySelectionAndMalformedTags() {
+        assertTrue(CaptionLanguageFilter.isTagAllowed(
+                Collections.emptySet(), "en"));
+        assertTrue(CaptionLanguageFilter.isTagAllowed(
+                Collections.emptySet(), null));
+        assertTrue(CaptionLanguageFilter.isTagAllowed(
+                CaptionLanguageFilter.normalizeSelection(null), "und"));
+        final Set<String> selected = set("en");
+        assertTrue(CaptionLanguageFilter.isTagAllowed(selected, "en-US"));
+        assertTrue(!CaptionLanguageFilter.isTagAllowed(selected, "de"));
+        assertTrue(!CaptionLanguageFilter.isTagAllowed(selected, null));
+        assertTrue(!CaptionLanguageFilter.isTagAllowed(selected, "und"));
+        assertTrue(!CaptionLanguageFilter.isTagAllowed(selected, ""));
+    }
+
+    @Test
+    public void primaryCodeOfHandlesNullAndUndetermined() {
+        assertEquals("", CaptionLanguageFilter.primaryCodeOf(null));
+        assertEquals("", CaptionLanguageFilter.primaryCodeOf(new Locale("und")));
+        assertEquals("en", CaptionLanguageFilter.primaryCodeOf(Locale.ENGLISH));
+    }
+
+    @Test
+    public void displayNameForFallsBackToUppercaseCode() {
+        assertEquals("English",
+                CaptionLanguageFilter.displayNameFor("en", Locale.ENGLISH));
+        assertEquals("XX",
+                CaptionLanguageFilter.displayNameFor("xx", Locale.ENGLISH));
+    }
+
+    @Test
+    public void sortedDisplayNamesHandlesNullSelection() {
+        assertTrue(CaptionLanguageFilter.sortedDisplayNames(null,
+                Collections.emptyMap(),
+                Collator.getInstance(Locale.ENGLISH)).isEmpty());
+    }
+
+    @Test
+    public void blankOnlySelectionShowsAll() {
+        final List<SubtitlesStream> source = Arrays.asList(stream("en"), stream("de"));
+        assertEquals(2, CaptionLanguageFilter.filterSubtitles(
+                set("", "   "), source).size());
     }
 
     @Test
@@ -115,14 +165,14 @@ public class CaptionLanguageFilterTest {
     }
 
     @Test
-    public void nonmatchingAndMalformedTagsAreExcluded() {
+    public void undeterminedAndMalformedTagsAreExcluded() {
         final List<SubtitlesStream> source = Arrays.asList(
-                stream("en"), stream("de"), stream("und"));
+                stream("en"), stream("de"), stream("und"), stream("123"));
         final List<SubtitlesStream> result =
                 CaptionLanguageFilter.filterSubtitles(set("en"), source);
         assertEquals(Collections.singletonList("en"), tags(result));
-        // Empty allowlist still shows everything, including odd tags.
-        assertEquals(3, CaptionLanguageFilter
+        // Empty allowlist still shows everything, including undetermined tags.
+        assertEquals(4, CaptionLanguageFilter
                 .filterSubtitles(Collections.emptySet(), source).size());
     }
 
@@ -159,6 +209,7 @@ public class CaptionLanguageFilterTest {
         assertTrue(codes.contains("yue"));
         assertTrue(codes.contains("ceb"));
         assertTrue(codes.contains("haw"));
+        assertTrue(!codes.contains("und"));
         // Every code is a canonical two- or three-letter primary.
         for (final String code : codes) {
             assertEquals(code, CaptionLanguageFilter.canonicalPrimaryCode(code));
