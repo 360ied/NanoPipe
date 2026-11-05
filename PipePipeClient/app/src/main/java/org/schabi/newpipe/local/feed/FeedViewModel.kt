@@ -108,6 +108,9 @@ class FeedViewModel(
         refreshRequestedAt = now
         seenNonProcessingProgress = false
         failedSticky = false
+        // Fresh load owns fresh terminal/timer/error state: a persistent per-item
+        // failure must re-fire on explicit retry instead of staying silent.
+        lastErrorSet = emptySet()
         // Fresh load owns fresh terminal/timer state: stale progress markers would
         // defeat the slice-4 rotation re-arm, and a stale celebration would leak
         // into the next load. consumedTerminal is instance-compared, so it needs
@@ -132,13 +135,15 @@ class FeedViewModel(
         if (event is SuccessResultEvent) failedSticky = false
     }
 
-    private fun errorSetKey(errors: List<Throwable>): Set<String> = errors.map { e ->
-        if (e is FeedLoadService.RequestException) {
-            "${e.subscriptionId}|${e.cause?.let { it::class.qualifiedName } ?: "null"}|${e.cause?.message}"
-        } else {
-            "raw|${e::class.qualifiedName}|${e.message}"
-        }
-    }.toSet()
+    private fun errorKey(e: Throwable): String = if (e is FeedLoadService.RequestException) {
+        "${e.subscriptionId}|${e.cause?.let { it::class.qualifiedName } ?: "null"}|${e.cause?.message}"
+    } else {
+        "raw|${e::class.qualifiedName ?: e::class.simpleName}|${e.message}"
+    }
+
+    // Internal for the fragment's re-render guard: same keying, view-lifetime memory.
+    internal fun errorSetKey(errors: List<Throwable>): Set<String> =
+        errors.map(::errorKey).toSet()
 
     private var combineDisposable = Flowable
         .combineLatest(
@@ -173,10 +178,15 @@ class FeedViewModel(
         .subscribeOn(ioScheduler)
         .observeOn(ioScheduler)
         .map { (event, showPlayedItems, notLoadedCount, oldestUpdate) ->
-            onScopedEvent(event)
-            val effectiveEvent = if ((event is SuccessResultEvent || event is ErrorResultEvent) &&
+            // Suppressed terminals are DB-recombine replays of an already-handled
+            // instance: the first pass ran the scoped side-effects, so re-running
+            // them would clear a legitimately tripped sticky or re-stamp state.
+            val suppressed = (event is SuccessResultEvent || event is ErrorResultEvent) &&
                 event === consumedTerminal
-            ) {
+            if (!suppressed) {
+                onScopedEvent(event)
+            }
+            val effectiveEvent = if (suppressed) {
                 IdleEvent()
             } else {
                 event
@@ -204,6 +214,8 @@ class FeedViewModel(
         .subscribe { holder ->
             val (event, listFromDB, notLoadedCount, oldestUpdate, queryError) = holder
             if (queryError != null) {
+                // Query failure is sticky like any fatal: rotation must re-show it.
+                failedSticky = true
                 mutableStateLiveData.postValue(FeedState.ErrorState(queryError))
                 return@subscribe
             }
@@ -252,13 +264,17 @@ class FeedViewModel(
                     // Fresh DB query already resolved above; no-op gate holds here when only
                     // processing-only progress was seen — still emit fresh LoadedState silently.
                     consumedTerminal = event
-                    // Error-set gate (slice 3b): same set consecutively → no re-fire;
-                    // error-free Success clears the set.
+                    // Error-set gate: same set consecutively → report only the delta;
+                    // error-free Success clears the set. Reset per reload in
+                    // onReloadRequested so a persistent failure re-fires on retry.
                     val errorSet = errorSetKey(event.itemsErrors)
+                    val newKeys = errorSet - lastErrorSet
                     val errorsToReport =
-                        if (errorSet == lastErrorSet) emptyList() else event.itemsErrors
+                        event.itemsErrors.filter { errorKey(it) in newKeys }
                     lastErrorSet = errorSet
-                    if (!event.cancelled) pendingCelebration = true
+                    // Celebrate only loads that did real work: a processing-only
+                    // Success is the silent no-op path, errors still surface above.
+                    if (!event.cancelled && seenNonProcessingProgress) pendingCelebration = true
                     mutableStateLiveData.postValue(
                         FeedState.LoadedState(
                             listFromDB.map { e -> StreamItem(e) },

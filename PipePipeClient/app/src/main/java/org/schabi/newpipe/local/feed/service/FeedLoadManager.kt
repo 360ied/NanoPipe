@@ -73,7 +73,8 @@ class FeedLoadManager(private val context: Context) {
         ignoreOutdatedThreshold: Boolean = false,
     ): Single<List<Notification<FeedUpdateInfo>>> {
         // Without this, a Cancel followed by a re-tap into the same live service instance
-        // poisons the next load (takeWhile is immediately false). Slice 3a.
+        // poisons the next load (takeWhile is immediately false): cooperative-cancel
+        // reset required on every entry into a reused manager.
         cancelSignal.set(false)
         // Fresh holder per load: sequential loads on this reused manager must not
         // carry prior errors into the next SuccessResultEvent.
@@ -144,10 +145,14 @@ class FeedLoadManager(private val context: Context) {
                     // Prompt cancel: delay() is not interruptible, so race the wait
                     // against a cooperative poll — a cancel during a long
                     // service-throttle wait completes this rail immediately instead
-                    // of letting the action appear dead.
+                    // of letting the action appear dead. Dropped rails emit nothing:
+                    // below-max progress at a cancelled terminal is expected.
                     .takeUntil(
-                        Flowable.interval(50L, 50L, TimeUnit.MILLISECONDS)
-                            .filter { cancelSignal.get() }
+                        Flowable.interval(
+                            CANCEL_POLL_INTERVAL_MS,
+                            CANCEL_POLL_INTERVAL_MS,
+                            TimeUnit.MILLISECONDS
+                        ).filter { cancelSignal.get() }
                     )
                     .map {
                         lastFetchTimePerService[serviceId] = System.currentTimeMillis()
@@ -250,15 +255,7 @@ class FeedLoadManager(private val context: Context) {
                                 throw wrapper
                             }
                         }
-                            .retry { retryCount, throwable ->
-                                // Check if it's the actual wrapped exception
-                                val actualException = when (throwable) {
-                                    is FeedLoadService.RequestException -> throwable.cause
-                                    else -> throwable
-                                }
-                                false
-                            }
-                            // Now wrap in Notification AFTER retry logic
+                            // Wrap in Notification (no retry: a false predicate would silently drop loads).
                             .map { feedUpdateInfo ->
                                 Notification.createOnNext(feedUpdateInfo)
                             }
@@ -314,11 +311,15 @@ class FeedLoadManager(private val context: Context) {
         )
         feedDatabaseManager.removeOrphansOrOlderStreams()
 
+        // Re-sample at post time: a cancel landing during the orphan cleanup must
+        // not celebrate. Snapshot the errors: the next load's clear() must not
+        // mutate this already-posted event.
+        val cancelledAtPost = wasCancelled || cancelSignal.get()
         FeedEventManager.postEvent(
             FeedEventManager.Event.SuccessResultEvent(
-                feedResultsHolder.itemsErrors,
+                feedResultsHolder.itemsErrors.toList(),
                 groupId,
-                wasCancelled
+                cancelledAtPost
             )
         )
     }.doOnSubscribe {
@@ -414,6 +415,9 @@ class FeedLoadManager(private val context: Context) {
     companion object {
 
         private val TAG = FeedLoadManager::class.java.simpleName
+
+        /** Poll interval racing the per-service throttle wait against cooperative cancel. */
+        private const val CANCEL_POLL_INTERVAL_MS = 50L
 
         /**
          * Constant used to check for updates of subscriptions with [NotificationMode.ENABLED].

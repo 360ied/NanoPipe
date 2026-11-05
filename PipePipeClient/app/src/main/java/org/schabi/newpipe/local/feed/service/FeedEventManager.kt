@@ -7,8 +7,8 @@ import org.schabi.newpipe.database.feed.model.FeedGroupEntity
 import org.schabi.newpipe.local.feed.service.FeedEventManager.Event.IdleEvent
 
 object FeedEventManager {
-    // reset()/ignoreUpstream removed: slice 3a replaced the global reset with the
-    // VM-local consumedTerminal, and the old reset self-suppressed its own event.
+    // No global reset: the VM-local consumedTerminal replaced it (the old reset
+    // self-suppressed its own event).
     private val processor: BehaviorProcessor<Event> = BehaviorProcessor.create()
     private val eventsFlowable = processor.startWithItem(IdleEvent())
 

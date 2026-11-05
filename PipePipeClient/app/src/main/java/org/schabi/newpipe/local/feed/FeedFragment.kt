@@ -59,6 +59,7 @@ import com.xwray.groupie.OnAsyncUpdateListener
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import com.xwray.groupie.OnItemClickListener
 import com.xwray.groupie.OnItemLongClickListener
@@ -271,13 +272,21 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
         viewModel.stateLiveData.observe(viewLifecycleOwner) { it?.let(::handleResult) }
 
         // Slice 4: collect the pre-throttle timer ticks to cancel/relaunch timerJob.
+        // Retry on unexpected errors so one bad tick can't park the timers silently.
         viewLifecycleOwner.lifecycleScope.launch {
-            try {
-                viewModel.timerTicks.collect { event -> onScopedTimerTick(event) }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                Log.w(TAG, "timerTicks collect ended", e)
+            while (isActive) {
+                try {
+                    viewModel.timerTicks.collect { event -> onScopedTimerTick(event) }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.w(TAG, "timerTicks collect ended, retrying", e)
+                    try {
+                        delay(1_000)
+                    } catch (ce: CancellationException) {
+                        throw ce
+                    }
+                }
             }
         }
 
@@ -293,11 +302,19 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
                     } catch (e: Exception) {
                         Log.w(TAG, "sticky re-show has no view", e)
                     }
+                    try {
+                        updateRefreshViewState()
+                    } catch (e: Exception) {
+                    }
                 } else {
                     val requestedAt = viewModel.refreshRequestedAt
                     val lastProgressAt = viewModel.lastProgressAt
                     val latest = viewModel.latestScopedEvent
-                    if (requestedAt != null && lastProgressAt == null) {
+                    // Throttle-lag guard: latest already Progress but not yet stamped —
+                    // the 60 s leg owns this window, not an immediate 10 s trip.
+                    if (requestedAt != null && lastProgressAt == null &&
+                        latest !is FeedEventManager.Event.ProgressEvent
+                    ) {
                         val remaining = TIMEOUT_NO_EVENT_MS - (now - requestedAt)
                         if (remaining <= 0) {
                             onRefreshTimeout("timeout10s-rearm-elapsed")
@@ -873,12 +890,14 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
     // Handling
     // //////////////////////////////////////////////////////////////////////////
 
+    private var lastSurfacedErrorSet: Set<String>? = null
+
     // Rows hidden behind a no-match filter still count as content: fullscreen
     // first-start UI only when truly nothing is loaded and no filter hides it.
     private fun hasVisibleOrHiddenContent(): Boolean {
         return try {
             (::groupAdapter.isInitialized && groupAdapter.itemCount > 0) ||
-                (isFilterEnabled && originalItems.isNotEmpty())
+                originalItems.isNotEmpty()
         } catch (e: Exception) {
             false
         }
@@ -1074,7 +1093,12 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
             progressState.maxProgress == -1
 
         feedBinding.loadingProgressText.text = if (!isIndeterminate) {
-            "${progressState.currentProgress}/${progressState.maxProgress}"
+            val current = if (progressState.maxProgress > 0 && progressState.currentProgress == -1) {
+                0
+            } else {
+                progressState.currentProgress
+            }
+            "$current/${progressState.maxProgress}"
         } else if (progressState.progressMessage > 0) {
             getString(progressState.progressMessage)
         } else {
@@ -1140,6 +1164,9 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
 
     @SuppressLint("StringFormatMatches")
     private fun handleLoadedState(loadedState: FeedState.LoadedState) {
+        // Terminal render owns the spinner from here: a live timeout would post a
+        // bogus retry snackbar if the tick path ever misses it.
+        cancelTimer()
         snackbar?.dismiss()
         // Scoped celebration (slice 3b): only a fresh non-cancelled Success sets the
         // pending flag; DB-only recombines never do. Selection skips + freezes the count.
@@ -1223,9 +1250,18 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
             }
         }
 
-        // Error-set gate removed (slice 3b): the VM dedupes identical sets, so surface
-        // unconditionally; same set consecutively never re-fires.
-        handleItemsErrors(loadedState.itemsErrors)
+        // Re-render guard (pass 2): the VM dedupes across terminals, but re-rendering
+        // the same LoadedState (view-mode toggle, rotation replay) bypasses it.
+        // Surface only when the set changed since this view last surfaced it.
+        val errorSet = try {
+            viewModel.errorSetKey(loadedState.itemsErrors)
+        } catch (e: Exception) {
+            null
+        }
+        if (errorSet != null && errorSet != lastSurfacedErrorSet) {
+            lastSurfacedErrorSet = errorSet
+            handleItemsErrors(loadedState.itemsErrors)
+        }
         oldestSubscriptionUpdate = loadedState.oldestUpdate
 
         if (unfilteredEmpty) {
@@ -1237,6 +1273,7 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
     }
 
     private fun handleErrorState(errorState: FeedState.ErrorState): Boolean {
+        cancelTimer()
         // Defensive null branch: the VM never posts ErrorState(null) today.
         return if (errorState.error == null) {
             hideLoading()
@@ -1300,6 +1337,8 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
         timerJob = scope.launch {
             try {
                 delay(delayMs)
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 return@launch
             }
@@ -1311,16 +1350,32 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
     private fun onRefreshTimeout(reason: String) {
         timerJob = null
         if (!isAdded || _feedBinding == null) return
+        // Narrow terminal race: a terminal queued behind this task already settled
+        // the load — don't resurrect a failure on top of fresh content.
+        val awaiting = try {
+            val latest = viewModel.latestScopedEvent
+            latest is FeedEventManager.Event.ProgressEvent ||
+                (viewModel.refreshRequestedAt != null && viewModel.lastProgressAt == null)
+        } catch (e: Exception) {
+            true
+        }
+        if (!awaiting) return
         try {
             viewModel.onNoProgressTimeout()
         } catch (e: Exception) {
         }
-        isRefreshing = false
-        try {
-            feedBinding.swipeRefreshLayout.isRefreshing = false
-        } catch (e: Exception) {
+        if (!hasVisibleOrHiddenContent()) {
+            // No-content timeout mirrors the fatal path: error container, no
+            // infinite centered spinner, header retry + snackbar below.
+            handleError()
+        } else {
+            isRefreshing = false
+            try {
+                feedBinding.swipeRefreshLayout.isRefreshing = false
+            } catch (e: Exception) {
+            }
+            stopRefreshIconSpin()
         }
-        stopRefreshIconSpin()
         Log.d("FeedRefresh", "spinnerClear/" + reason + "@" + SystemClock.elapsedRealtime())
         try {
             updateRefreshViewState()
@@ -1689,7 +1744,11 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
                 putExtra(FeedLoadService.EXTRA_GROUP_ID, groupId)
             }
         )
-        listState = null
+        // Duplicate taps must not destroy the pending scroll restore: the eventual
+        // terminal belongs to the first load.
+        if (!duplicate) {
+            listState = null
+        }
     }
 
     companion object {

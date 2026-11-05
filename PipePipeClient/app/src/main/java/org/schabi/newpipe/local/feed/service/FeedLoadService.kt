@@ -111,9 +111,13 @@ class FeedLoadService : Service() {
     }
 
     private fun disposeAll() {
-        try {
-            unregisterReceiver(broadcastReceiver)
-        } catch (e: Exception) {
+        // Guard the lateinit receiver: a first-start destroy has nothing registered.
+        if (::broadcastReceiver.isInitialized) {
+            try {
+                unregisterReceiver(broadcastReceiver)
+            } catch (e: IllegalArgumentException) {
+                Log.w(TAG, "receiver already unregistered", e)
+            }
         }
         loadingDisposable?.dispose()
         loadingDisposable = null
@@ -195,7 +199,7 @@ class FeedLoadService : Service() {
         notificationBuilder.setProgress(state.maxProgress, state.currentProgress, state.maxProgress == -1)
 
         if (state.maxProgress == -1) {
-            if (state.updateDescription.isNotEmpty()) notificationBuilder.setContentText(state.updateDescription)
+            // Single set: an empty description clears stale text instead of keeping it.
             notificationBuilder.setContentText(state.updateDescription)
         } else {
             val progressText = state.currentProgress.toString() + "/" + state.maxProgress
