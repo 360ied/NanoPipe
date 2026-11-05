@@ -58,15 +58,15 @@ import com.xwray.groupie.Item
 import com.xwray.groupie.OnAsyncUpdateListener
 import com.xwray.groupie.OnItemClickListener
 import com.xwray.groupie.OnItemLongClickListener
+import io.reactivex.rxjava3.android.schedulers.AndroidSchedulers
+import io.reactivex.rxjava3.core.Single
+import io.reactivex.rxjava3.disposables.CompositeDisposable
+import io.reactivex.rxjava3.schedulers.Schedulers
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import io.reactivex.rxjava3.android.schedulers.AndroidSchedulers
-import io.reactivex.rxjava3.core.Single
-import io.reactivex.rxjava3.disposables.CompositeDisposable
-import io.reactivex.rxjava3.schedulers.Schedulers
 import org.schabi.newpipe.NewPipeDatabase
 import org.schabi.newpipe.R
 import org.schabi.newpipe.database.feed.model.FeedGroupEntity
@@ -408,8 +408,14 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
         feedBinding.refreshRootView.setOnClickListener { reloadContent() }
         feedBinding.refreshIcon.setOnClickListener { reloadContent() }
         feedBinding.refreshSubtitleText.setOnLongClickListener {
-            showNotLoadedSubscriptions()
-            true
+            // The subtitle is reused for filter-empty and failure text: only offer
+            // the not-loaded dialog when that is what it shows.
+            if (subtitleShowsNotLoaded) {
+                showNotLoadedSubscriptions()
+                true
+            } else {
+                false
+            }
         }
         feedBinding.swipeRefreshLayout.setOnRefreshListener { reloadContent() }
         feedBinding.newItemsLoadedButton.setOnClickListener {
@@ -664,7 +670,7 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
                 }
             }
         } catch (e: Exception) {
-            // ignore: selection state is best-effort across recreation
+            // ignore: feed query is best-effort across recreation
         }
         outState.putBundle("selection", Bundle().also { selection.saveState(it) })
     }
@@ -897,7 +903,12 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
     // Handling
     // //////////////////////////////////////////////////////////////////////////
 
+    // View-lifetime memory of surfaced error sets: rotation (new view) re-fires,
+    // same-view re-renders with the same set do not. Reset on fresh reload.
     private var lastSurfacedErrorSet: Set<String>? = null
+    // Whether the header subtitle currently shows not-loaded content: gates the
+    // long-press dialog, which would otherwise fire on unrelated subtitle text.
+    private var subtitleShowsNotLoaded = false
 
     // Rows hidden behind a no-match filter still count as content: fullscreen
     // first-start UI only when truly nothing is loaded and no filter hides it.
@@ -1058,10 +1069,12 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
             feedBinding.refreshSubtitleText.isVisible = true
             feedBinding.refreshSubtitleText.text = combinedText
             feedBinding.refreshSubtitleText.contentDescription = combinedText
+            subtitleShowsNotLoaded = state.notLoadedCount > 0
         } else {
             feedBinding.refreshSubtitleText.isVisible = false
             feedBinding.refreshSubtitleText.text = ""
             feedBinding.refreshSubtitleText.contentDescription = null
+            subtitleShowsNotLoaded = false
         }
     }
 
@@ -1268,9 +1281,11 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
                 } catch (e: Exception) {
                 }
             }
+            subtitleShowsNotLoaded = false
         } else {
             feedBinding.refreshSubtitleText.setOnClickListener(null)
             val feedsNotLoaded = loadedState.notLoadedCount > 0
+            subtitleShowsNotLoaded = feedsNotLoaded
             feedBinding.refreshSubtitleText.isVisible = feedsNotLoaded
             if (feedsNotLoaded) {
                 feedBinding.refreshSubtitleText.text = getString(
@@ -1397,7 +1412,9 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
             viewModel.onNoProgressTimeout()
         } catch (e: Exception) {
         }
-        if (!hasVisibleOrHiddenContent()) {
+        // Panel and snackbar are alternative affordances (never both, like the
+        // fatal path): the panel persists, the snackbar is for the sticky case.
+        val panelShown = if (!hasVisibleOrHiddenContent()) {
             // No-content timeout mirrors the fatal path: clear the spinners, then
             // show the error panel — no later render carries a retry, so without
             // the panel the screen would go blank once the snackbar dismisses.
@@ -1409,6 +1426,7 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
                     "Loading feed"
                 )
             )
+            true
         } else {
             isRefreshing = false
             try {
@@ -1416,16 +1434,19 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
             } catch (e: Exception) {
             }
             stopRefreshIconSpin()
+            false
         }
         Log.d("FeedRefresh", "spinnerClear/" + reason + "@" + SystemClock.elapsedRealtime())
         try {
             updateRefreshViewState()
         } catch (e: Exception) {
         }
-        try {
-            showRetrySnackbar()
-        } catch (e: Exception) {
-            Log.w(TAG, "stuck snackbar has no view", e)
+        if (!panelShown) {
+            try {
+                showRetrySnackbar()
+            } catch (e: Exception) {
+                Log.w(TAG, "stuck snackbar has no view", e)
+            }
         }
     }
 
@@ -1619,6 +1640,7 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
             // The subtitle listener belongs to the filter-empty state (set in
             // handleLoadedState): a sticky overwrite must not inherit its action.
             feedBinding.refreshSubtitleText.setOnClickListener(null)
+            subtitleShowsNotLoaded = false
             feedBinding.refreshIcon.contentDescription =
                 getString(R.string.feed_refresh_failed_tap_to_retry)
             feedBinding.refreshIcon.isFocusable = false

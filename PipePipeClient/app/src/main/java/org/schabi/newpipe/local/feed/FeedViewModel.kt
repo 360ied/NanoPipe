@@ -85,6 +85,8 @@ class FeedViewModel(
     }
 
     // Slice 3b query persistence: source of truth across rotation (written per keystroke).
+    // Main-confined like consumeCelebration (fragment keystroke path only): the
+    // @Volatile covers visibility, never concurrent RMW.
     @Volatile
     var savedQuery: String? = null
     @Volatile
@@ -159,7 +161,7 @@ class FeedViewModel(
     internal fun errorSetKey(errors: List<Throwable>): Set<String> =
         errors.map(::errorKey).toSet()
 
-    private var combineDisposable = Flowable
+    private val combineDisposable = Flowable
         .combineLatest(
             eventsSource
                 .filter { passesIndicator(it) }
@@ -197,7 +199,11 @@ class FeedViewModel(
         .throttleLatest(DEFAULT_THROTTLE_TIMEOUT, TimeUnit.MILLISECONDS)
         .subscribeOn(ioScheduler)
         .observeOn(ioScheduler)
-        .map { (event, showPlayedItems, notLoadedCount, oldestUpdate) ->
+        .map { input ->
+            val (event, showPlayedItems, notLoadedCount, oldestUpdate) = input
+            // Map-time generation: a reload during a slow DB query must not
+            // inherit this emission's side-effects (see stale-holder guard).
+            val mapGeneration = loadGeneration
             // Suppressed terminals are DB-recombine replays of an already-handled
             // instance: the first pass ran the scoped side-effects, so re-running
             // them would clear a legitimately tripped sticky or re-stamp state.
@@ -206,7 +212,9 @@ class FeedViewModel(
             // the view's surfaced-error-set guard.
             val suppressed = (event is SuccessResultEvent || event is ErrorResultEvent) &&
                 event === consumedTerminal
-            if (!suppressed) {
+            if (!suppressed && mapGeneration == loadGeneration) {
+                // Stale progress (reload landed mid-query) must not resurrect
+                // timer stamps the new load already cleared.
                 onScopedEvent(event)
             }
             // Fatal errors re-post their cached outcome (panel persists across
@@ -240,11 +248,19 @@ class FeedViewModel(
                 Pair(arrayListOf(), e)
             }
 
-            CombineResultDataHolder(effectiveEvent, streamItems, notLoadedCount, oldestUpdate, queryError)
+            CombineResultDataHolder(
+                effectiveEvent,
+                streamItems,
+                notLoadedCount,
+                oldestUpdate,
+                queryError,
+                mapGeneration
+            )
         }
         .observeOn(mainScheduler)
         .subscribe({ holder ->
-            val (event, listFromDB, notLoadedCount, oldestUpdate, queryError) = holder
+            val (rawEvent, listFromDB, notLoadedCount, oldestUpdate, queryError, mapGeneration) =
+                holder
             if (queryError != null) {
                 // Query failures surface transiently (snackbar/panel) like before:
                 // only event terminals persist sticky failure across rotation.
@@ -255,6 +271,17 @@ class FeedViewModel(
                 mutableStateLiveData.value = FeedState.ErrorState(queryError)
                 return@subscribe
             }
+            // Stale-holder guard: a terminal whose map ran before a reload must not
+            // stamp the new load's generations, error set, or celebration — render
+            // its fresh list silently instead. Progress renders through: the spinner
+            // is already owned by the new load.
+            val event =
+                if ((rawEvent is SuccessResultEvent || rawEvent is ErrorResultEvent) &&
+                    mapGeneration != loadGeneration) {
+                    IdleEvent()
+                } else {
+                    rawEvent
+                }
             when (event) {
                 is ProgressEvent -> {
                     if (event.maxProgress > 0 || event.currentProgress >= 0) {
@@ -293,8 +320,11 @@ class FeedViewModel(
                 is SuccessResultEvent -> {
                     // Fresh DB query already resolved above; no-op gate holds here when only
                     // processing-only progress was seen — still emit fresh LoadedState silently.
-                    consumedTerminal = event
+                    // Generation first: a map-stage read interleaved between the two
+                    // writes must see suppressed == false (duplicate terminal, benign)
+                    // rather than a torn fatal downgraded to Idle (panel loss).
                     terminalGeneration = loadGeneration
+                    consumedTerminal = event
                     // Error-set gate: same set consecutively → report only the delta;
                     // error-free Success clears the set. Reset per reload in
                     // onReloadRequested so a persistent failure re-fires on retry.
@@ -315,8 +345,10 @@ class FeedViewModel(
                     seenNonProcessingProgress = false
                 }
                 is ErrorResultEvent -> {
-                    consumedTerminal = event
+                    // Generation first: see the Success branch — torn reads must fail
+                    // toward duplicate render, never toward downgrade.
                     terminalGeneration = loadGeneration
+                    consumedTerminal = event
                     mutableStateLiveData.value = FeedState.ErrorState(event.error)
                     seenNonProcessingProgress = false
                 }
@@ -344,7 +376,8 @@ class FeedViewModel(
         val t2: List<StreamWithState>,
         val t3: Long,
         val t4: OffsetDateTime?,
-        val t5: Throwable? = null
+        val t5: Throwable? = null,
+        val mapGeneration: Long = -1L
     )
 
     fun togglePlayedItems(showPlayedItems: Boolean) {

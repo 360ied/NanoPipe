@@ -424,8 +424,8 @@ counts); group-scoping arrives in slice 3a.
   subtitle `Refresh failed — tap to retry` (new
   `feed_refresh_failed_tap_to_retry`); tapping `refresh_root_view` or
   `refreshIcon` calls `reloadContent()` as today. `refresh_root_view`
-  gets `contentDescription = @string/feed_retry_desc` (new, e.g.
-  "Refresh failed — tap to retry") **only** while in the failed state,
+  gets `contentDescription = @string/feed_refresh_failed_tap_to_retry`
+  (e.g. "Refresh failed — tap to retry") **only** while in the failed state,
   else `null` (so it is not an a11y action when idle). Both entry
   points fire the same idempotent `reloadContent()` (single-flight
   dedupes) — dual affordance, not dual state machines. Absorbed re-tap
@@ -690,8 +690,7 @@ events via §4.2 scoping (ignored events do not cancel timers).
    `showEmptyState()` also clears `isRefreshing`,
    `reloadContent()` calls `hideErrorPanel()` first, fatal-with-content
    (`handleErrorState`/`handleError` `itemCount == 0` branch) snackbar +
-   header retry + `feed_refresh_failed_tap_to_retry` +
-   `feed_retry_desc` strings. No `ViewModel`/`State` shape change.
+   header retry + `feed_refresh_failed_tap_to_retry` string. No `ViewModel`/`State` shape change.
    Acceptance: populated list AND header never hide on refresh/fatal;
    empty adapter still panels; retry from the panel dismisses it
    immediately. Dialog-field tracking + `onDestroyView` dismiss for all
@@ -895,9 +894,9 @@ questions remain):
   join format `%1$s · %2$s` with arg order, fatal precedence,
   `refresh_text` rules, `max == 0` defensive treatment with
   `filter`-guard cite and `FeedRefresh` log tag). Remaining is translator
-  review of the five new strings (`feed_refreshing_progress`,
+  review of the four new strings (`feed_refreshing_progress`,
   `feed_refreshing_with_not_loaded`, `feed_refresh_failed_tap_to_retry`,
-  `feed_retry_desc`, `feed_no_filter_results`), not the shape.
+  `feed_no_filter_results`), not the shape.
   Per-channel names stay notification-only.
 - Throttle interplay: accepted as terminal + 500 ms (§7 fast-refresh
   test owns it).
