@@ -135,7 +135,7 @@ public final class CaptionLanguageFilter {
      *
      * @return the matching streams in their original order as new, independent
      *         list holding the original objects; an absent or empty selection
-     *         returns every input stream in a new list
+     *         returns every non-null input stream in a new list
      */
     @NonNull
     public static List<SubtitlesStream> filterSubtitles(
@@ -246,6 +246,7 @@ public final class CaptionLanguageFilter {
     public static String displayNameFor(@NonNull final String code,
                                        @NonNull final Locale displayLocale) {
         Objects.requireNonNull(code);
+        Objects.requireNonNull(displayLocale);
         final String name = new Locale(code).getDisplayLanguage(displayLocale);
         if (name == null || name.isEmpty() || name.equals(code)) {
             return code.toUpperCase(Locale.ROOT);

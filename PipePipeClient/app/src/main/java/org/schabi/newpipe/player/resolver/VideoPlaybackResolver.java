@@ -205,7 +205,8 @@ public class VideoPlaybackResolver implements PlaybackResolver {
         // Below are auxiliary media sources
 
         // Create subtitle sources
-        // The extra copy keeps removeTorrentStreams() from mutating
+        // filterSubtitles() returns a fresh list and this extra copy pins that
+        // guarantee at the seam, so removeTorrentStreams() below cannot mutate
         // StreamInfo's backing subtitle list (downloads keep the full list).
         final List<SubtitlesStream> subtitlesStreams = new ArrayList<>(
                 CaptionLanguageFilter.filterSubtitles(

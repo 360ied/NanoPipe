@@ -103,8 +103,9 @@ public class VideoAudioSettingsFragment extends BasePreferenceFragment {
         final Preference preference =
                 requirePreference(R.string.caption_language_filter_key);
         if (!(preference instanceof MultiSelectListPreference)) {
-            throw new IllegalStateException(
-                    "caption_language_filter_key must be a MultiSelectListPreference");
+            throw new IllegalStateException("Preference '"
+                    + getString(R.string.caption_language_filter_key)
+                    + "' must be a MultiSelectListPreference");
         }
         final MultiSelectListPreference filterPreference =
                 (MultiSelectListPreference) preference;
@@ -266,8 +267,7 @@ public class VideoAudioSettingsFragment extends BasePreferenceFragment {
     @Override
     public void onResume() {
         super.onResume();
-        getPreferenceManager().getSharedPreferences()
-                .registerOnSharedPreferenceChangeListener(listener);
+        // Normalize before registering so a dirty write cannot self-notify.
         final Preference preference =
                 findPreference(getString(R.string.caption_language_filter_key));
         if (preference instanceof MultiSelectListPreference) {
@@ -276,6 +276,8 @@ public class VideoAudioSettingsFragment extends BasePreferenceFragment {
             normalizePersistedCaptionLanguages(filterPreference);
             updateCaptionLanguageFilterSummary(filterPreference);
         }
+        getPreferenceManager().getSharedPreferences()
+                .registerOnSharedPreferenceChangeListener(listener);
     }
 
     @Override

@@ -5,6 +5,7 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotSame;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 
 import java.text.Collator;
 import java.util.ArrayList;
@@ -271,6 +272,19 @@ public class CaptionLanguageFilterTest {
         final List<String> sorted = new ArrayList<>(names);
         Collections.sort(sorted, collator);
         assertEquals(sorted, names);
+    }
+
+    @Test
+    public void nameMapIsUnmodifiable() {
+        final Map<String, String> map = CaptionLanguageFilter.nameMap(
+                CaptionLanguageFilter.buildVocabulary(
+                        Locale.ENGLISH, Collections.singletonList(Locale.ENGLISH)));
+        try {
+            map.put("xx", "Xx");
+            fail("nameMap should be unmodifiable");
+        } catch (final UnsupportedOperationException expected) {
+            // Expected: the cached map must reject mutation.
+        }
     }
 
     @Test

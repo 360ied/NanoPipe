@@ -49,16 +49,19 @@ public abstract class BasePreferenceFragment extends PreferenceFragmentCompat {
     }
 
     @NonNull
-    public final Preference requirePreference(@StringRes final int resId) {
-        final Preference preference = findPreference(getString(resId));
-        String keyName;
+    protected final Preference requirePreference(@StringRes final int resId) {
+        final String entryName;
+        final String key;
         try {
-            keyName = getResources().getResourceEntryName(resId);
+            entryName = getResources().getResourceEntryName(resId);
+            key = getString(resId);
         } catch (final Resources.NotFoundException e) {
-            keyName = "resId=" + resId;
+            throw new IllegalArgumentException(
+                    "Missing preference for invalid resId=" + resId, e);
         }
-        final String missingKey = keyName;
-        return Objects.requireNonNull(preference,
-                () -> "Missing preference for key " + missingKey);
+        final Preference preference = findPreference(key);
+        final String message =
+                "Missing preference for key '" + key + "' (" + entryName + ")";
+        return Objects.requireNonNull(preference, () -> message);
     }
 }
