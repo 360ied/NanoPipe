@@ -22,15 +22,16 @@ No caption-language filter exists in the audited tree.
 - `PlayerTracksController.onTextTracksChanged()` collects every ExoPlayer text
   track's language label and passes the complete list to
   `PlayerMenuController.buildCaptionMenu()`
-  (`PlayerTracksController.kt:47-86`, `PlayerMenuController.kt:256-312`).
+  (`PlayerTracksController.kt:47-86`, `PlayerMenuController.kt:256-344`).
 - `caption_user_set_key` remembers the selected display label and reapplies it
   on later track updates. It selects a caption; it does not filter the list.
-- `show_auto_translated_subtitles` and
-  `auto_translated_subtitles_language` control whether YouTube extraction may
+- `show_auto_translated_subtitles_key` and
+  `auto_translated_subtitles_language_key` control whether YouTube extraction may
   append one translated track. They are not a general caption allowlist.
 - `YoutubeStreamExtractor.getSubtitles()` always processes the source
   `captionTracks` and conditionally appends that translation
-  (`YoutubeStreamExtractor.java:1876-1953`). Source auto-generated tracks are
+  (`YoutubeStreamExtractor.java:1878-1951`, subject to the `hasDuplicateEntries`
+  gate). Source auto-generated tracks are
   still returned when the additional translation is disabled.
 - `DownloadDialog` has a separate subtitle spinner backed directly by
   `SubtitlesStream` objects. It has no language filter and is not part of this
@@ -47,7 +48,7 @@ Add **Caption languages** to **Settings → Video and audio**, immediately next
 to the existing Captions preference that opens Android's caption-style
 settings.
 
-Tapping it opens the platform `MultiSelectListPreference` dialog:
+Tapping it opens the AndroidX `MultiSelectListPreference` dialog:
 
 - Each row is a language name with a checkbox.
 - There is no text field and therefore no keyboard interaction.
@@ -106,7 +107,8 @@ display labels.
   if needed so the supported vocabulary explicitly includes `yue`
   (Cantonese), `ceb` (Cebuano), and `haw` (Hawaiian). Do not duplicate the
   small auto-translation target list, which is not a complete vocabulary.
-- Display each language with `Locale.getDisplayName()` in the Settings UI
+  Skip blank or empty primary subtags when building the vocabulary.
+- Display each language with `Locale.getDisplayLanguage()` in the Settings UI
   locale and sort names with the current locale's `Collator`.
 - Fall back to the uppercase code if a platform locale has no display name.
 - Canonicalize and deduplicate entry values before storing normalized
@@ -169,8 +171,8 @@ In `VideoAudioSettingsFragment`:
 2. Render the summary from the stored set and the same name/code mapping.
 3. Extend the existing preference-change listener to refresh that summary
    when `caption_language_filter_key` changes.
-4. Refresh the summary on resume as well, matching the fragment's existing
-   lifecycle pattern.
+4. Refresh the summary on resume as well, following the fragment's
+   register-on-resume pattern.
 
 Use a short list of selected names for a small selection and a localized
 `N languages selected` summary beyond that limit. Do not add a custom
@@ -238,7 +240,9 @@ with player presentation.
 
 Leave `caption_user_set_key` unchanged. If its language is excluded when a
 side-loaded source is next resolved, that track is not added to the merged
-media source. Do not delete the saved label, so removing the filter can
+media source. The existing reapply logic still sets the saved language as the
+preferred track with the renderer enabled, so no track is pre-selected and
+the user picks from the filtered popup. Do not delete the saved label, so removing the filter can
 restore the user's earlier choice without migration. Manifest-embedded tracks
 remain governed by their existing behavior.
 
@@ -282,7 +286,9 @@ extractor should not need changes.
 - **List independence:** downstream torrent removal cannot mutate the
   original `StreamInfo` subtitle list, including with an empty allowlist.
 - **Saved caption:** filtering never rewrites or removes
-  `caption_user_set_key`.
+  `caption_user_set_key`. If the saved language is filtered out, no track is
+  pre-selected and the user picks from the filtered popup; clearing the
+  filter restores the earlier choice without migration.
 - **Auto-translation:** extraction still follows its existing advanced
   settings. An appended translation appears in the player only if its primary
   language is allowed; it remains available to downloads regardless.
