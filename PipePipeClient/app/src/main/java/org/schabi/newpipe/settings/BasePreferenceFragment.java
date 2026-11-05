@@ -1,6 +1,7 @@
 package org.schabi.newpipe.settings;
 
 import android.content.SharedPreferences;
+import android.content.res.Resources;
 import android.os.Bundle;
 import android.view.View;
 
@@ -17,10 +18,10 @@ import org.schabi.newpipe.util.ThemeHelper;
 import java.util.Objects;
 
 public abstract class BasePreferenceFragment extends PreferenceFragmentCompat {
-    protected final String TAG = getClass().getSimpleName() + "@" + Integer.toHexString(hashCode());
+    protected final String TAG = getClass().getSimpleName();
     protected static final boolean DEBUG = MainActivity.DEBUG;
 
-    SharedPreferences defaultPreferences;
+    protected SharedPreferences defaultPreferences;
 
     @Override
     public void onCreate(@Nullable final Bundle savedInstanceState) {
@@ -48,9 +49,18 @@ public abstract class BasePreferenceFragment extends PreferenceFragmentCompat {
     }
 
     @NonNull
-    public final Preference requirePreference(@StringRes final int resId) {
-        final Preference preference = findPreference(getString(resId));
-        Objects.requireNonNull(preference);
-        return preference;
+    protected final Preference requirePreference(@StringRes final int resId) {
+        final String entryName;
+        final String key;
+        try {
+            entryName = getResources().getResourceEntryName(resId);
+            key = getString(resId);
+        } catch (final Resources.NotFoundException e) {
+            throw new IllegalArgumentException(
+                    "Missing preference for invalid resId=" + resId, e);
+        }
+        final Preference preference = findPreference(key);
+        return Objects.requireNonNull(preference,
+                () -> "Missing preference for key '" + key + "' (" + entryName + ")");
     }
 }

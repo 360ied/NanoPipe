@@ -5,6 +5,7 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.os.Bundle;
 import android.provider.Settings;
+import android.text.TextUtils;
 import android.util.Log;
 import android.widget.Toast;
 
@@ -17,9 +18,15 @@ import com.google.android.material.snackbar.Snackbar;
 
 import org.schabi.newpipe.R;
 import org.schabi.newpipe.error.ErrorUtil;
+import org.schabi.newpipe.util.CaptionLanguageFilter;
+import org.schabi.newpipe.util.CaptionLanguageFilter.LanguageEntry;
 import org.schabi.newpipe.util.CodecSupportDetector;
 import org.schabi.newpipe.util.PermissionHelper;
 
+import java.text.Collator;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
@@ -33,6 +40,15 @@ public class VideoAudioSettingsFragment extends BasePreferenceFragment {
     private static final int IDX_VP9 = 0;
     private static final int IDX_AV1 = 1;
 
+    /** Dialog tag for the caption-language checklist; guards double-show. */
+    private static final String CAPTION_LANGUAGE_DIALOG_TAG = "caption_language_filter_dialog";
+
+    /** Maximum selected languages listed by name before the summary collapses to a count. */
+    private static final int MAX_NAMES_IN_SUMMARY = 3;
+
+    private Map<String, String> captionLanguageCodeToName;
+    private Locale captionLanguageCacheLocale;
+
     private SharedPreferences.OnSharedPreferenceChangeListener listener;
     private final CompositeDisposable disposables = new CompositeDisposable();
 
@@ -42,6 +58,13 @@ public class VideoAudioSettingsFragment extends BasePreferenceFragment {
         addPreferencesFromResourceRegistry();
 
         listener = (sharedPreferences, s) -> {
+            if (s == null) {
+                return;
+            }
+            if (s.equals(getString(R.string.caption_language_filter_key))) {
+                normalizePersistedCaptionLanguages();
+                updateCaptionLanguageFilterSummary();
+            }
             if (s.equals(getString(R.string.minimize_on_exit_key))) {
                 final String newSetting = sharedPreferences.getString(s, null);
                 if (newSetting != null
@@ -65,6 +88,84 @@ public class VideoAudioSettingsFragment extends BasePreferenceFragment {
                     runDetection(preference);
                     return true;
                 });
+
+        setupCaptionLanguageFilter();
+    }
+
+    /**
+     * Build the caption-language vocabulary once and refresh the summary.
+     * The checklist itself lives in {@link CaptionLanguageSelectionDialog}.
+     * No stored selection (empty set) means all languages.
+     */
+    private void setupCaptionLanguageFilter() {
+        requirePreference(R.string.caption_language_filter_key);
+        buildCaptionLanguageMaps();
+        normalizePersistedCaptionLanguages();
+        updateCaptionLanguageFilterSummary();
+    }
+
+    private void buildCaptionLanguageMaps() {
+        // Cached per display locale so every onResume() does not re-collate ~200
+        // locales; an in-app locale change still rebuilds so dialog and summary agree.
+        final Locale displayLocale = Locale.getDefault();
+        if (captionLanguageCodeToName != null
+                && displayLocale.equals(captionLanguageCacheLocale)) {
+            return;
+        }
+        final List<LanguageEntry> vocabulary = CaptionLanguageFilter.buildVocabulary(
+                displayLocale,
+                Arrays.asList(Locale.getAvailableLocales()));
+        captionLanguageCodeToName =
+                CaptionLanguageFilter.nameMap(vocabulary);
+        captionLanguageCacheLocale = displayLocale;
+    }
+
+    /**
+     * Canonicalize the stored set (e.g. restored from a backup) so the dialog
+     * and the summary reflect the effective filter. Unknown codes are kept
+     * and preserved across dialog confirms (they are invisible there): the
+     * summary falls back to uppercase. Playback normalizes independently, so
+     * this only affects settings display.
+     */
+    private void normalizePersistedCaptionLanguages() {
+        final SharedPreferences prefs = PreferenceManager
+                .getDefaultSharedPreferences(requireContext());
+        final String key = getString(R.string.caption_language_filter_key);
+        final Set<String> stored = prefs.getStringSet(key, null);
+        final Set<String> normalized =
+                CaptionLanguageFilter.normalizeSelection(stored);
+        if (stored == null || !normalized.equals(stored)) {
+            prefs.edit().putStringSet(key, normalized).apply();
+        }
+    }
+
+    private void updateCaptionLanguageFilterSummary() {
+        if (!isAdded() || captionLanguageCodeToName == null) {
+            return;
+        }
+        final Preference preference =
+                findPreference(getString(R.string.caption_language_filter_key));
+        if (preference == null) {
+            return;
+        }
+        final Set<String> selected = CaptionLanguageFilter.normalizeSelection(
+                PreferenceManager.getDefaultSharedPreferences(requireContext())
+                        .getStringSet(
+                                getString(R.string.caption_language_filter_key), null));
+        if (selected.isEmpty()) {
+            preference.setSummary(R.string.caption_language_filter_all);
+            return;
+        }
+        final List<String> names = CaptionLanguageFilter.sortedDisplayNames(
+                selected, captionLanguageCodeToName,
+                Collator.getInstance(Locale.getDefault()));
+        if (names.size() <= MAX_NAMES_IN_SUMMARY) {
+            preference.setSummary(TextUtils.join(
+                    getString(R.string.caption_language_filter_list_separator), names));
+        } else {
+            preference.setSummary(getResources().getQuantityString(
+                    R.plurals.caption_language_filter_count, names.size(), names.size()));
+        }
     }
 
     /**
@@ -150,12 +251,21 @@ public class VideoAudioSettingsFragment extends BasePreferenceFragment {
 
     @Override
     public boolean onPreferenceTreeClick(final Preference preference) {
+        if (getString(R.string.caption_language_filter_key).equals(preference.getKey())) {
+            if (getParentFragmentManager().findFragmentByTag(
+                    CAPTION_LANGUAGE_DIALOG_TAG) == null) {
+                new CaptionLanguageSelectionDialog().show(
+                        getParentFragmentManager(), CAPTION_LANGUAGE_DIALOG_TAG);
+            }
+            return true;
+        }
         if (getString(R.string.caption_settings_key).equals(preference.getKey())) {
             try {
                 startActivity(new Intent(Settings.ACTION_CAPTIONING_SETTINGS));
             } catch (final ActivityNotFoundException e) {
                 Toast.makeText(getActivity(), R.string.general_error, Toast.LENGTH_SHORT).show();
             }
+            return true;
         }
 
         return super.onPreferenceTreeClick(preference);
@@ -164,14 +274,18 @@ public class VideoAudioSettingsFragment extends BasePreferenceFragment {
     @Override
     public void onResume() {
         super.onResume();
-        getPreferenceManager().getSharedPreferences()
+        // Normalize before registering so a dirty write cannot self-notify.
+        buildCaptionLanguageMaps();
+        normalizePersistedCaptionLanguages();
+        updateCaptionLanguageFilterSummary();
+        PreferenceManager.getDefaultSharedPreferences(requireContext())
                 .registerOnSharedPreferenceChangeListener(listener);
     }
 
     @Override
     public void onPause() {
         super.onPause();
-        getPreferenceManager().getSharedPreferences()
+        PreferenceManager.getDefaultSharedPreferences(requireContext())
                 .unregisterOnSharedPreferenceChangeListener(listener);
     }
 

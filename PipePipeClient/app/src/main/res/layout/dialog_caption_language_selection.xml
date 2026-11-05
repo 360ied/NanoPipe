@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- match_parent + weighted list: the dialog window bounds the height, so the
+     list scrolls internally and the buttons stay visible on small screens. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              android:layout_width="match_parent"
+              android:layout_height="match_parent"
+              android:orientation="vertical"
+              android:padding="16dp">
+
+    <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/caption_language_filter_dialog_text"
+            android:textSize="14sp"
+            android:layout_marginBottom="12dp" />
+
+    <EditText
+            android:id="@+id/caption_language_search"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="@string/caption_language_filter_search_hint"
+            android:inputType="text"
+            android:imeOptions="actionDone"
+            android:ellipsize="end"
+            android:maxLines="1"
+            android:autofillHints="none"
+            android:layout_marginBottom="8dp" />
+
+    <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/caption_language_recycler_view"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1" />
+
+    <TextView
+            android:id="@+id/caption_language_empty"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/caption_language_filter_no_match"
+            android:textSize="14sp"
+            android:padding="12dp"
+            android:visibility="gone" />
+
+    <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginTop="16dp"
+            android:gravity="end">
+
+        <Button
+                android:id="@+id/cancel_button"
+                style="@style/Widget.AppCompat.Button.Borderless"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@android:string/cancel"
+                android:layout_marginEnd="8dp" />
+
+        <Button
+                android:id="@+id/save_button"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@android:string/ok" />
+
+    </LinearLayout>
+
+</LinearLayout>
