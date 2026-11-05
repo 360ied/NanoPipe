@@ -61,6 +61,7 @@ class FeedLoadService : Service() {
 
     private var loadingDisposable: Disposable? = null
     private var notificationDisposable: Disposable? = null
+    private var currentGroupId: Long = FeedGroupEntity.GROUP_ALL_ID
 
     private lateinit var feedLoadManager: FeedLoadManager
 
@@ -82,7 +83,7 @@ class FeedLoadService : Service() {
             )
         }
 
-        if (intent == null || loadingDisposable != null) {
+        if (intent == null || (loadingDisposable != null && loadingDisposable?.isDisposed == false)) {
             return START_NOT_STICKY
         }
 
@@ -90,6 +91,7 @@ class FeedLoadService : Service() {
         setupBroadcastReceiver()
 
         val groupId = intent.getLongExtra(EXTRA_GROUP_ID, FeedGroupEntity.GROUP_ALL_ID)
+        currentGroupId = groupId
         loadingDisposable = feedLoadManager.startLoading(groupId)
             .observeOn(AndroidSchedulers.mainThread())
             .doOnSubscribe {
@@ -105,9 +107,14 @@ class FeedLoadService : Service() {
     }
 
     private fun disposeAll() {
-        unregisterReceiver(broadcastReceiver)
+        try {
+            unregisterReceiver(broadcastReceiver)
+        } catch (e: Exception) {
+        }
         loadingDisposable?.dispose()
+        loadingDisposable = null
         notificationDisposable?.dispose()
+        notificationDisposable = null
     }
 
     private fun stopService() {
@@ -218,7 +225,7 @@ class FeedLoadService : Service() {
     // /////////////////////////////////////////////////////////////////////////
 
     private fun handleError(error: Throwable) {
-        postEvent(ErrorResultEvent(error))
+        postEvent(ErrorResultEvent(error, currentGroupId))
         stopService()
     }
 }

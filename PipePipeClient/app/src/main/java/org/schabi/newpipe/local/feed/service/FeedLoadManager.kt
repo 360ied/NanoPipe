@@ -72,6 +72,9 @@ class FeedLoadManager(private val context: Context) {
         groupId: Long = FeedGroupEntity.GROUP_ALL_ID,
         ignoreOutdatedThreshold: Boolean = false,
     ): Single<List<Notification<FeedUpdateInfo>>> {
+        // Without this, a Cancel followed by a re-tap into the same live service instance
+        // poisons the next load (takeWhile is immediately false). Slice 3a.
+        cancelSignal.set(false)
         val defaultSharedPreferences = PreferenceManager.getDefaultSharedPreferences(context)
         val useFeedExtractor = defaultSharedPreferences.getBoolean(
             context.getString(R.string.feed_use_dedicated_fetch_method_key),
@@ -118,7 +121,7 @@ class FeedLoadManager(private val context: Context) {
             .observeOn(AndroidSchedulers.mainThread())
             .doOnNext {
                 notificationUpdater.onNext("")
-                broadcastProgress()
+                broadcastProgress(groupId)
             }
             .observeOn(Schedulers.io())
             .flatMap { Flowable.fromIterable(it) }
@@ -257,24 +260,25 @@ class FeedLoadManager(private val context: Context) {
 
             .sequential()
             .observeOn(AndroidSchedulers.mainThread())
-            .doOnNext(NotificationConsumer())
+            .doOnNext(NotificationConsumer(groupId))
             .observeOn(Schedulers.io())
             .buffer(BUFFER_COUNT_BEFORE_INSERT)
             .doOnNext(DatabaseConsumer())
             .subscribeOn(Schedulers.io())
             .toList()
-            .flatMap { x -> postProcessFeed().toSingleDefault(x.flatten()) }
+            .flatMap { x -> postProcessFeed(groupId).toSingleDefault(x.flatten()) }
     }
 
     fun cancel() {
         cancelSignal.set(true)
     }
 
-    private fun broadcastProgress() {
+    private fun broadcastProgress(groupId: Long) {
         FeedEventManager.postEvent(
             FeedEventManager.Event.ProgressEvent(
                 currentProgress.get(),
-                maxProgress.get()
+                maxProgress.get(),
+                groupId = groupId
             )
         )
     }
@@ -286,25 +290,40 @@ class FeedLoadManager(private val context: Context) {
      * Remove streams from the feed which are older than [FeedDatabaseManager.FEED_OLDEST_ALLOWED_DATE].
      * Remove streams from the database which are not linked / used by any table.
      */
-    private fun postProcessFeed() = Completable.fromRunnable {
-        FeedEventManager.postEvent(FeedEventManager.Event.ProgressEvent(R.string.feed_processing_message))
+    private fun postProcessFeed(groupId: Long) = Completable.fromRunnable {
+        FeedEventManager.postEvent(
+            FeedEventManager.Event.ProgressEvent(
+                R.string.feed_processing_message,
+                groupId
+            )
+        )
         feedDatabaseManager.removeOrphansOrOlderStreams()
 
-        FeedEventManager.postEvent(FeedEventManager.Event.SuccessResultEvent(feedResultsHolder.itemsErrors))
+        FeedEventManager.postEvent(
+            FeedEventManager.Event.SuccessResultEvent(
+                feedResultsHolder.itemsErrors,
+                groupId
+            )
+        )
     }.doOnSubscribe {
         currentProgress.set(-1)
         maxProgress.set(-1)
 
         notificationUpdater.onNext(context.getString(R.string.feed_processing_message))
-        FeedEventManager.postEvent(FeedEventManager.Event.ProgressEvent(R.string.feed_processing_message))
+        FeedEventManager.postEvent(
+            FeedEventManager.Event.ProgressEvent(
+                R.string.feed_processing_message,
+                groupId
+            )
+        )
     }.subscribeOn(Schedulers.io())
 
-    private inner class NotificationConsumer : Consumer<Notification<FeedUpdateInfo>> {
+    private inner class NotificationConsumer(private val groupId: Long) : Consumer<Notification<FeedUpdateInfo>> {
         override fun accept(item: Notification<FeedUpdateInfo>) {
             currentProgress.incrementAndGet()
             notificationUpdater.onNext(item.value?.name.orEmpty())
 
-            broadcastProgress()
+            broadcastProgress(groupId)
         }
     }
 

@@ -9,26 +9,34 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.preference.PreferenceManager
 import io.reactivex.rxjava3.android.schedulers.AndroidSchedulers
 import io.reactivex.rxjava3.core.Flowable
+import io.reactivex.rxjava3.core.Scheduler
 import io.reactivex.rxjava3.functions.Function4
 import io.reactivex.rxjava3.processors.BehaviorProcessor
 import io.reactivex.rxjava3.schedulers.Schedulers
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
 import org.schabi.newpipe.R
 import org.schabi.newpipe.database.feed.model.FeedGroupEntity
 import org.schabi.newpipe.database.stream.StreamWithState
 import org.schabi.newpipe.local.feed.item.StreamItem
 import org.schabi.newpipe.local.feed.service.FeedEventManager
+import org.schabi.newpipe.local.feed.service.FeedEventManager.Event
 import org.schabi.newpipe.local.feed.service.FeedEventManager.Event.ErrorResultEvent
 import org.schabi.newpipe.local.feed.service.FeedEventManager.Event.IdleEvent
 import org.schabi.newpipe.local.feed.service.FeedEventManager.Event.ProgressEvent
 import org.schabi.newpipe.local.feed.service.FeedEventManager.Event.SuccessResultEvent
+import org.schabi.newpipe.local.feed.service.FeedLoadManager
 import org.schabi.newpipe.util.DEFAULT_THROTTLE_TIMEOUT
 import java.time.OffsetDateTime
 import java.util.concurrent.TimeUnit
 
 class FeedViewModel(
     private val applicationContext: Context,
-    groupId: Long = FeedGroupEntity.GROUP_ALL_ID,
-    initialShowPlayedItems: Boolean = true
+    private val groupId: Long = FeedGroupEntity.GROUP_ALL_ID,
+    initialShowPlayedItems: Boolean = true,
+    eventsSource: Flowable<Event> = FeedEventManager.events(),
+    ioScheduler: Scheduler = Schedulers.io(),
+    mainScheduler: Scheduler = AndroidSchedulers.mainThread()
 ) : ViewModel() {
     private var feedDatabaseManager: FeedDatabaseManager = FeedDatabaseManager(applicationContext)
 
@@ -42,13 +50,35 @@ class FeedViewModel(
 
     private var seenNonProcessingProgress = false
 
+    // Slice 3a push channel: timer-stamp tap emits here pre-throttle for every passing
+    // Progress/Success/Error (Idle explicitly exempt). Fragment collection lands in slice 4.
+    private val _timerTicks = MutableSharedFlow<Event>(extraBufferCapacity = 64)
+    val timerTicks: SharedFlow<Event> = _timerTicks
+
+    // Local terminal replacement (slice 3a): the consumed terminal instance. Later recombines
+    // with the same cached terminal render as Idle — no stale errors, no panel resurrection.
+    // Fresh terminals (unequal) always render. No FeedEventManager.reset() needed.
+    @Volatile
+    private var consumedTerminal: Event? = null
+
+    private fun passesIndicator(event: Event): Boolean =
+        event.groupId == groupId ||
+            event.groupId == FeedGroupEntity.GROUP_ALL_ID ||
+            (groupId == FeedGroupEntity.GROUP_ALL_ID &&
+                event.groupId != FeedLoadManager.GROUP_NOTIFICATION_ENABLED)
+
     fun onReloadRequested() {
         seenNonProcessingProgress = false
     }
 
     private var combineDisposable = Flowable
         .combineLatest(
-            FeedEventManager.events(),
+            eventsSource
+                .filter { passesIndicator(it) }
+                .doOnNext { e ->
+                    // Timer-stamp tap: narrower predicate (indicator + non-Idle), pre-throttle.
+                    if (e !is IdleEvent) _timerTicks.tryEmit(e)
+                },
             toggleShowPlayedItemsFlowable,
             feedDatabaseManager.notLoadedCount(groupId),
             feedDatabaseManager.oldestSubscriptionUpdate(groupId),
@@ -59,19 +89,26 @@ class FeedViewModel(
             }
         )
         .throttleLatest(DEFAULT_THROTTLE_TIMEOUT, TimeUnit.MILLISECONDS)
-        .subscribeOn(Schedulers.io())
-        .observeOn(Schedulers.io())
+        .subscribeOn(ioScheduler)
+        .observeOn(ioScheduler)
         .map { (event, showPlayedItems, notLoadedCount, oldestUpdate) ->
-            val streamItems = if (event is SuccessResultEvent || event is IdleEvent || event is ProgressEvent)
+            val effectiveEvent = if ((event is SuccessResultEvent || event is ErrorResultEvent) &&
+                event == consumedTerminal
+            ) {
+                IdleEvent()
+            } else {
+                event
+            }
+            val streamItems = if (effectiveEvent is SuccessResultEvent || effectiveEvent is IdleEvent || effectiveEvent is ProgressEvent)
                 feedDatabaseManager
                     .getStreams(groupId, showPlayedItems)
                     .blockingGet(arrayListOf())
             else
                 arrayListOf()
 
-            CombineResultDataHolder(event, streamItems, notLoadedCount, oldestUpdate)
+            CombineResultDataHolder(effectiveEvent, streamItems, notLoadedCount, oldestUpdate)
         }
-        .observeOn(AndroidSchedulers.mainThread())
+        .observeOn(mainScheduler)
         .subscribe { (event, listFromDB, notLoadedCount, oldestUpdate) ->
             when (event) {
                 is ProgressEvent -> {
@@ -117,6 +154,7 @@ class FeedViewModel(
                 is SuccessResultEvent -> {
                     // Fresh DB query already resolved above; no-op gate holds here when only
                     // processing-only progress was seen — still emit fresh LoadedState silently.
+                    consumedTerminal = event
                     mutableStateLiveData.postValue(
                         FeedState.LoadedState(
                             listFromDB.map { e -> StreamItem(e) },
@@ -126,12 +164,11 @@ class FeedViewModel(
                         )
                     )
                     seenNonProcessingProgress = false
-                    FeedEventManager.reset()
                 }
                 is ErrorResultEvent -> {
+                    consumedTerminal = event
                     mutableStateLiveData.postValue(FeedState.ErrorState(event.error))
                     seenNonProcessingProgress = false
-                    FeedEventManager.reset()
                 }
             }
         }
