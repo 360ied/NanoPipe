@@ -48,6 +48,7 @@ import androidx.core.content.edit
 import androidx.core.os.bundleOf
 import androidx.core.view.isVisible
 import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.lifecycleScope
 import androidx.preference.PreferenceManager
 import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.RecyclerView
@@ -55,6 +56,9 @@ import com.google.android.material.snackbar.Snackbar
 import com.xwray.groupie.GroupieAdapter
 import com.xwray.groupie.Item
 import com.xwray.groupie.OnAsyncUpdateListener
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import com.xwray.groupie.OnItemClickListener
 import com.xwray.groupie.OnItemLongClickListener
 import io.reactivex.rxjava3.android.schedulers.AndroidSchedulers
@@ -82,6 +86,7 @@ import org.schabi.newpipe.ktx.animate
 import org.schabi.newpipe.ktx.animateHideRecyclerViewAllowingScrolling
 import org.schabi.newpipe.ktx.slideUp
 import org.schabi.newpipe.local.feed.item.StreamItem
+import org.schabi.newpipe.local.feed.service.FeedEventManager
 import org.schabi.newpipe.local.feed.service.FeedLoadService
 import org.schabi.newpipe.local.subscription.SubscriptionManager
 import org.schabi.newpipe.player.PlayerService
@@ -126,6 +131,8 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
     private var infoItemDialog: InfoItemDialog? = null
     private var snackbar: Snackbar? = null
     private var refreshIconAnimator: ObjectAnimator? = null
+    // Slice 4: sequential single timerJob, viewLifecycleOwner-bound, cancelled in onDestroyView.
+    private var timerJob: Job? = null
 
     private var lastNewItemsCount = 0
 
@@ -261,6 +268,53 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
         // Bundle backup for process death; rotation keeps the VM instance itself.
         savedInstanceState?.getString("feedQuery")?.let { viewModel.savedQuery = it }
         viewModel.stateLiveData.observe(viewLifecycleOwner) { it?.let(::handleResult) }
+
+        // Slice 4: collect the pre-throttle timer ticks to cancel/relaunch timerJob.
+        viewLifecycleOwner.lifecycleScope.launch {
+            try {
+                viewModel.timerTicks.collect { event -> onScopedTimerTick(event) }
+            } catch (e: Exception) {
+                Log.w(TAG, "timerTicks collect ended", e)
+            }
+        }
+
+        // Slice 4 rotation re-derive: re-arm the phase-appropriate timer with the
+        // remaining delay, or re-show the sticky snackbar. First creation is a no-op
+        // (refreshRequestedAt is null until the first reloadContent).
+        try {
+            if (::viewModel.isInitialized && isAdded) {
+                val now = SystemClock.elapsedRealtime()
+                if (viewModel.failedSticky) {
+                    try {
+                        showRetrySnackbar()
+                    } catch (e: Exception) {
+                        Log.w(TAG, "sticky re-show has no view", e)
+                    }
+                } else {
+                    val requestedAt = viewModel.refreshRequestedAt
+                    val lastProgressAt = viewModel.lastProgressAt
+                    val latest = viewModel.latestScopedEvent
+                    if (requestedAt != null && lastProgressAt == null) {
+                        val remaining = 10_000 - (now - requestedAt)
+                        if (remaining <= 0) {
+                            onRefreshTimeout("timeout10s-rearm-elapsed")
+                        } else {
+                            launchTimeout(remaining) { onRefreshTimeout("timeout10s-rearm") }
+                        }
+                    } else if (latest is FeedEventManager.Event.ProgressEvent) {
+                        val lastAt = lastProgressAt ?: requestedAt ?: now
+                        val remaining = 60_000 - (now - lastAt)
+                        if (remaining <= 0) {
+                            onRefreshTimeout("timeout60s-rearm-elapsed")
+                        } else {
+                            launchTimeout(remaining) { onRefreshTimeout("timeout60s-rearm") }
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "timer re-arm failed", e)
+        }
 
         groupAdapter = GroupieAdapter().apply {
             setOnItemClickListener(listenerStreamItem)
@@ -546,6 +600,7 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
         tryGetNewItemsLoadedButton()?.clearAnimation()
 
         selection.setListener(null)
+        cancelTimer()
         stopRefreshIconSpin()
         notLoadedDialog?.dismiss()
         notLoadedDialog = null
@@ -828,11 +883,13 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
             feedBinding.swipeRefreshLayout.isRefreshing = true
         }
         isRefreshing = true
+        Log.d("FeedRefresh", "spinnerStart/showLoading@" + SystemClock.elapsedRealtime())
     }
 
     override fun hideLoading() {
         super.hideLoading()
         stopRefreshIconSpin()
+        Log.d("FeedRefresh", "spinnerClear/hideLoading@" + SystemClock.elapsedRealtime())
         feedBinding.itemsList.animate(true, 0)
         feedBinding.refreshRootView.animate(true, 200)
         feedBinding.loadingProgressText.animate(false, 0)
@@ -843,6 +900,7 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
     override fun showEmptyState() {
         super.showEmptyState()
         stopRefreshIconSpin()
+        Log.d("FeedRefresh", "spinnerClear/showEmptyState@" + SystemClock.elapsedRealtime())
         feedBinding.itemsList.animateHideRecyclerViewAllowingScrolling()
         feedBinding.refreshRootView.animate(true, 200)
         feedBinding.loadingProgressText.animate(false, 0)
@@ -865,6 +923,7 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
     override fun handleError() {
         super.handleError()
         stopRefreshIconSpin()
+        Log.d("FeedRefresh", "spinnerClear/handleError@" + SystemClock.elapsedRealtime())
         val hasContent = try {
             ::groupAdapter.isInitialized && groupAdapter.itemCount > 0
         } catch (e: Exception) {
@@ -1176,16 +1235,21 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
         }
     }
 
+    private fun showRetrySnackbar() {
+        if (snackbar?.isShown == true) return
+        val root: View = _feedBinding?.itemsList ?: requireView()
+        snackbar = Snackbar.make(
+            root,
+            getString(R.string.feed_load_error),
+            Snackbar.LENGTH_LONG
+        ).setAction(getString(R.string.retry)) { reloadContent() }
+        snackbar?.show()
+    }
+
     private fun showFatalSnackbar(error: Throwable) {
         if (snackbar?.isShown == true) return
         try {
-            val root: View = _feedBinding?.itemsList ?: requireView()
-            snackbar = Snackbar.make(
-                root,
-                getString(R.string.feed_load_error),
-                Snackbar.LENGTH_LONG
-            ).setAction(getString(R.string.retry)) { reloadContent() }
-            snackbar?.show()
+            showRetrySnackbar()
         } catch (e: Exception) {
             try {
                 ErrorUtil.showSnackbar(
@@ -1195,6 +1259,93 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
             } catch (e: Exception) {
             }
         }
+    }
+
+    // Slice 4 timers: sequential single timerJob. Ticks arrive pre-throttle via the VM
+    // push channel; terminal ticks cancel, Progress ticks (re)launch the 60 s leg.
+    private fun cancelTimer() {
+        try {
+            timerJob?.cancel()
+        } catch (e: Exception) {
+        }
+        timerJob = null
+    }
+
+    private fun launchTimeout(delayMs: Long, onTrip: () -> Unit) {
+        cancelTimer()
+        val scope = try {
+            viewLifecycleOwner.lifecycleScope
+        } catch (e: Exception) {
+            return
+        }
+        timerJob = scope.launch {
+            try {
+                delay(delayMs)
+            } catch (e: Exception) {
+                return@launch
+            }
+            if (!isAdded) return@launch
+            onTrip()
+        }
+    }
+
+    private fun onRefreshTimeout(reason: String) {
+        timerJob = null
+        if (!isAdded || _feedBinding == null) return
+        try {
+            viewModel.onNoProgressTimeout()
+        } catch (e: Exception) {
+        }
+        isRefreshing = false
+        try {
+            feedBinding.swipeRefreshLayout.isRefreshing = false
+        } catch (e: Exception) {
+        }
+        Log.d("FeedRefresh", "spinnerClear/" + reason + "@" + SystemClock.elapsedRealtime())
+        try {
+            updateRefreshViewState()
+        } catch (e: Exception) {
+        }
+        try {
+            showRetrySnackbar()
+        } catch (e: Exception) {
+            Log.w(TAG, "stuck snackbar has no view", e)
+        }
+    }
+
+    private fun onScopedTimerTick(event: FeedEventManager.Event) {
+        if (!isAdded || _feedBinding == null) return
+        cancelTimer()
+        if (event is FeedEventManager.Event.ProgressEvent) {
+            val sticky = try {
+                viewModel.failedSticky
+            } catch (e: Exception) {
+                false
+            }
+            if (sticky) {
+                // Late arrival after a failure: re-light, dismiss the stuck snackbar,
+                // resume 60 s tracking. Sticky clears on the terminal, not here.
+                isRefreshing = true
+                if (isPullToRefreshEnabled) {
+                    try {
+                        feedBinding.swipeRefreshLayout.isRefreshing = true
+                    } catch (e: Exception) {
+                    }
+                }
+                Log.d(
+                    "FeedRefresh",
+                    "spinnerStart/lateArrival@" + SystemClock.elapsedRealtime()
+                )
+                try {
+                    snackbar?.dismiss()
+                } catch (e: Exception) {
+                }
+            }
+            // Full 60 s from the tick ~= the 60_000 - (now - lastProgressAt) formula:
+            // the VM stamps lastProgressAt at the same upstream pass-through.
+            launchTimeout(60_000) { onRefreshTimeout("timeout60s") }
+        }
+        // Terminal ticks: the render path owns the spinner; nothing to arm.
     }
 
     private fun handleItemsErrors(errors: List<Throwable>) {
@@ -1477,13 +1628,18 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
     override fun doInitialLoadLogic() {}
 
     override fun reloadContent() {
-        try {
-            if (::viewModel.isInitialized) {
-                viewModel.onReloadRequested(SystemClock.elapsedRealtime())
+        // Re-tap while a load is in flight re-fires into the single-flight drop with
+        // no feedback: timestamps and timers continue under the first load.
+        val duplicate = isRefreshing
+        if (!duplicate) {
+            try {
+                if (::viewModel.isInitialized) {
+                    viewModel.onReloadRequested(SystemClock.elapsedRealtime())
+                }
+            } catch (e: Exception) {
             }
-        } catch (e: Exception) {
         }
-        if (_feedBinding != null) {
+        if (_feedBinding != null && !duplicate) {
             try {
                 hideErrorPanel()
             } catch (e: Exception) {
@@ -1496,10 +1652,13 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
                 } catch (e: Exception) {
                 }
             }
+            Log.d("FeedRefresh", "spinnerStart/reload@" + SystemClock.elapsedRealtime())
             try {
                 updateRefreshViewState()
             } catch (e: Exception) {
             }
+            // Arm the 10 s no-event leg; the first scoped Progress swaps it for 60 s.
+            launchTimeout(10_000) { onRefreshTimeout("timeout10s") }
         }
         hideNewItemsLoaded(false)
 

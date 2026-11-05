@@ -110,6 +110,11 @@ class FeedViewModel(
         failedSticky = false
     }
 
+    /** Slice 4 failure entry for the 10 s / 60 s timer trips, which have no event. */
+    fun onNoProgressTimeout() {
+        failedSticky = true
+    }
+
     fun onScopedEvent(event: Event, now: Long = SystemClock.elapsedRealtime()) {
         if (event is IdleEvent) return
         latestScopedEvent = event
