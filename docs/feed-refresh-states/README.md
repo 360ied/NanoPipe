@@ -4,8 +4,9 @@ How the What's New (`FeedFragment`) refresh path works today, why a
 refresh blanks the video list, and a proposed redesign that splits
 initial load from refresh so the list stays visible and interactive.
 
-- Status: proposal / draft, not implemented (rev. 8, 2026-11-05:
-  addresses pedantic review pass 7 — see §9).
+- Status: design rev. 9 (2026-11-05). Slices 1–3b are implemented; slice 4
+  (timers) remains — see §6/§9. A crash found during 3b verification is
+  documented and fixed — see §9.
 - Scope: `PipePipeClient/app/src/main/java/org/schabi/newpipe/local/feed/`
   (`FeedFragment.kt`, `FeedViewModel.kt`, `FeedState.kt`,
   `FeedDatabaseManager.kt`, `service/FeedEventManager.kt`,
@@ -642,6 +643,14 @@ events via §4.2 scoping (ignored events do not cancel timers).
   — the completion runs after its own diff, so a current generation always
   wins over a racing keystroke push; stale diffs are superseded, never merged.
   Test: type during refresh → final list matches the query.
+  3b crash fix (verified on device): typing a filter mid-refresh crashed
+  with `ConcurrentModificationException` in Groupie's background diff — the
+  async push held the live `filteredItems`/`originalItems` object while the
+  keystroke mutated it on the main thread. Rule hardened: every `updateAsync`
+  push sends an `ArrayList` snapshot, and `filterItems` uses the sync path
+  only when no async diff is in flight (tracked counter); otherwise the
+  keystroke joins the async generation chain, where Groupie discards stale
+  generations so the latest state always wins.
 - Process death mid-refresh: the `FeedEventManager` singleton resets to
   `Idle`, the VM and timers are gone. Expectation: cold start replays
   the DB (stale list or empty), idle header, no spinner/snackbar. No
@@ -1036,3 +1045,13 @@ questions remain):
   all three dialogs); §7 +6 tests (membership, dialog×3/toolbar-null,
   upstream death, late-cancel, stale-panel ordering); §6 Gates per slice +
   Given/When/Assert probes.
+- Rev. 9 (2026-11-05): slice-3b verification crash — typing a filter
+  mid-refresh crashed with `ConcurrentModificationException` in Groupie's
+  background diff (`DiffTask.doInBackground` → `DiffUtil` →
+  `GroupUtils.getItem`), which reads the pushed list while `filterItems`
+  mutates the same live object on the main thread. Fixed by snapshotting
+  every `updateAsync` push (`ArrayList` copy) and routing keystrokes through
+  the async generation chain while a refresh diff is in flight (sync fast
+  path only when idle; Groupie discards stale generations, latest wins).
+  §4.5 serialization rule hardened accordingly; status line updated
+  (slices 1–3b implemented, slice 4 remains).
