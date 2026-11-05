@@ -5,7 +5,6 @@ import static org.schabi.newpipe.MainActivity.DEBUG;
 import android.app.Activity;
 import android.content.Context;
 import android.content.DialogInterface;
-import android.os.Build;
 import android.util.Log;
 import android.view.View;
 import android.widget.TextView;
@@ -39,7 +38,7 @@ import java.util.stream.Stream;
  * This dialog is mostly used for longpress context menus.
  */
 public final class InfoItemDialog {
-    private static final String TAG = Build.class.getSimpleName();
+    private static final String TAG = InfoItemDialog.class.getSimpleName();
     /**
      * Ideally, {@link InfoItemDialog} would extend {@link AlertDialog}.
      * However, extending {@link AlertDialog} requires many additional lines
@@ -101,6 +100,10 @@ public final class InfoItemDialog {
 
     public void show() {
         dialog.show();
+    }
+
+    public void dismiss() {
+        dialog.dismiss();
     }
 
     /**

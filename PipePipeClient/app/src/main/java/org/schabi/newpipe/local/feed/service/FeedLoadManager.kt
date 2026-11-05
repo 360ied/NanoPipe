@@ -18,7 +18,6 @@ import org.schabi.newpipe.extractor.Info
 import org.schabi.newpipe.extractor.NewPipe
 import org.schabi.newpipe.extractor.feed.FeedInfo
 import org.schabi.newpipe.extractor.ListInfo
-import org.schabi.newpipe.extractor.exceptions.ContentNotAvailableException
 import org.schabi.newpipe.extractor.exceptions.ContentNotSupportedException
 import org.schabi.newpipe.extractor.stream.StreamInfoItem
 import org.schabi.newpipe.local.feed.FeedDatabaseManager
@@ -72,6 +71,13 @@ class FeedLoadManager(private val context: Context) {
         groupId: Long = FeedGroupEntity.GROUP_ALL_ID,
         ignoreOutdatedThreshold: Boolean = false,
     ): Single<List<Notification<FeedUpdateInfo>>> {
+        // Without this, a Cancel followed by a re-tap into the same live service instance
+        // poisons the next load (takeWhile is immediately false): cooperative-cancel
+        // reset required on every entry into a reused manager.
+        cancelSignal.set(false)
+        // Fresh holder per load: sequential loads on this reused manager must not
+        // carry prior errors into the next SuccessResultEvent.
+        feedResultsHolder.clear()
         val defaultSharedPreferences = PreferenceManager.getDefaultSharedPreferences(context)
         val useFeedExtractor = defaultSharedPreferences.getBoolean(
             context.getString(R.string.feed_use_dedicated_fetch_method_key),
@@ -118,7 +124,7 @@ class FeedLoadManager(private val context: Context) {
             .observeOn(AndroidSchedulers.mainThread())
             .doOnNext {
                 notificationUpdater.onNext("")
-                broadcastProgress()
+                broadcastProgress(groupId)
             }
             .observeOn(Schedulers.io())
             .flatMap { Flowable.fromIterable(it) }
@@ -135,6 +141,26 @@ class FeedLoadManager(private val context: Context) {
 
                 Flowable.just(subscriptionEntity)
                     .delay(wait, TimeUnit.MILLISECONDS)
+                    .let { delayed ->
+                        // Prompt cancel: delay() is not interruptible, so race a
+                        // non-trivial wait against a cooperative poll — a cancel during
+                        // a long service-throttle wait completes this rail immediately
+                        // instead of letting the action appear dead. Dropped rails emit
+                        // nothing: below-max progress at a cancelled terminal is expected.
+                        // Sub-poll-interval waits skip the poller: a 50 ms timer could
+                        // never fire before them anyway.
+                        if (wait > CANCEL_POLL_INTERVAL_MS) {
+                            delayed.takeUntil(
+                                Flowable.interval(
+                                    CANCEL_POLL_INTERVAL_MS,
+                                    CANCEL_POLL_INTERVAL_MS,
+                                    TimeUnit.MILLISECONDS
+                                ).filter { cancelSignal.get() }
+                            )
+                        } else {
+                            delayed
+                        }
+                    }
                     .map {
                         lastFetchTimePerService[serviceId] = System.currentTimeMillis()
                         it
@@ -236,15 +262,8 @@ class FeedLoadManager(private val context: Context) {
                                 throw wrapper
                             }
                         }
-                            .retry { retryCount, throwable ->
-                                // Check if it's the actual wrapped exception
-                                val actualException = when (throwable) {
-                                    is FeedLoadService.RequestException -> throwable.cause
-                                    else -> throwable
-                                }
-                                false
-                            }
-                            // Now wrap in Notification AFTER retry logic
+                            // Wrap in Notification: errors are already reified as
+                            // Notification.createOnError downstream, no retry involved.
                             .map { feedUpdateInfo ->
                                 Notification.createOnNext(feedUpdateInfo)
                             }
@@ -257,24 +276,25 @@ class FeedLoadManager(private val context: Context) {
 
             .sequential()
             .observeOn(AndroidSchedulers.mainThread())
-            .doOnNext(NotificationConsumer())
+            .doOnNext(NotificationConsumer(groupId))
             .observeOn(Schedulers.io())
             .buffer(BUFFER_COUNT_BEFORE_INSERT)
             .doOnNext(DatabaseConsumer())
             .subscribeOn(Schedulers.io())
             .toList()
-            .flatMap { x -> postProcessFeed().toSingleDefault(x.flatten()) }
+            .flatMap { x -> postProcessFeed(groupId).toSingleDefault(x.flatten()) }
     }
 
     fun cancel() {
         cancelSignal.set(true)
     }
 
-    private fun broadcastProgress() {
+    private fun broadcastProgress(groupId: Long) {
         FeedEventManager.postEvent(
             FeedEventManager.Event.ProgressEvent(
                 currentProgress.get(),
-                maxProgress.get()
+                maxProgress.get(),
+                groupId = groupId
             )
         )
     }
@@ -286,25 +306,49 @@ class FeedLoadManager(private val context: Context) {
      * Remove streams from the feed which are older than [FeedDatabaseManager.FEED_OLDEST_ALLOWED_DATE].
      * Remove streams from the database which are not linked / used by any table.
      */
-    private fun postProcessFeed() = Completable.fromRunnable {
-        FeedEventManager.postEvent(FeedEventManager.Event.ProgressEvent(R.string.feed_processing_message))
+    private fun postProcessFeed(groupId: Long) = Completable.fromRunnable {
+        // Sampled once at entry: a cancel landing during buffer/DatabaseConsumer/
+        // postProcessFeed still suppresses the celebration; only a cancel arriving
+        // after this sample is missed (documented race, next load is clean).
+        val wasCancelled = cancelSignal.get()
+        FeedEventManager.postEvent(
+            FeedEventManager.Event.ProgressEvent(
+                R.string.feed_processing_message,
+                groupId
+            )
+        )
         feedDatabaseManager.removeOrphansOrOlderStreams()
 
-        FeedEventManager.postEvent(FeedEventManager.Event.SuccessResultEvent(feedResultsHolder.itemsErrors))
+        // Re-sample at post time: a cancel landing during the orphan cleanup must
+        // not celebrate. The holder getter returns a snapshot, so the next load's
+        // clear() cannot mutate this already-posted event.
+        val cancelledAtPost = wasCancelled || cancelSignal.get()
+        FeedEventManager.postEvent(
+            FeedEventManager.Event.SuccessResultEvent(
+                feedResultsHolder.itemsErrors,
+                groupId,
+                cancelledAtPost
+            )
+        )
     }.doOnSubscribe {
         currentProgress.set(-1)
         maxProgress.set(-1)
 
         notificationUpdater.onNext(context.getString(R.string.feed_processing_message))
-        FeedEventManager.postEvent(FeedEventManager.Event.ProgressEvent(R.string.feed_processing_message))
+        FeedEventManager.postEvent(
+            FeedEventManager.Event.ProgressEvent(
+                R.string.feed_processing_message,
+                groupId
+            )
+        )
     }.subscribeOn(Schedulers.io())
 
-    private inner class NotificationConsumer : Consumer<Notification<FeedUpdateInfo>> {
+    private inner class NotificationConsumer(private val groupId: Long) : Consumer<Notification<FeedUpdateInfo>> {
         override fun accept(item: Notification<FeedUpdateInfo>) {
             currentProgress.incrementAndGet()
             notificationUpdater.onNext(item.value?.name.orEmpty())
 
-            broadcastProgress()
+            broadcastProgress(groupId)
         }
     }
 
@@ -379,6 +423,9 @@ class FeedLoadManager(private val context: Context) {
     companion object {
 
         private val TAG = FeedLoadManager::class.java.simpleName
+
+        /** Poll interval racing the per-service throttle wait against cooperative cancel. */
+        private const val CANCEL_POLL_INTERVAL_MS = 50L
 
         /**
          * Constant used to check for updates of subscriptions with [NotificationMode.ENABLED].

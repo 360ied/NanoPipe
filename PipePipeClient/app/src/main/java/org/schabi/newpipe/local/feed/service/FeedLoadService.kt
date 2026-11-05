@@ -61,6 +61,7 @@ class FeedLoadService : Service() {
 
     private var loadingDisposable: Disposable? = null
     private var notificationDisposable: Disposable? = null
+    private var currentGroupId: Long = FeedGroupEntity.GROUP_ALL_ID
 
     private lateinit var feedLoadManager: FeedLoadManager
 
@@ -82,7 +83,11 @@ class FeedLoadService : Service() {
             )
         }
 
-        if (intent == null || loadingDisposable != null) {
+        if (intent == null || (loadingDisposable != null && loadingDisposable?.isDisposed == false)) {
+            // Single-flight drop is group-agnostic: a second tab's request is ignored
+            // while any load runs. Its fragment still arms its own 10 s timer, which
+            // trips into retry UI instead of hanging — acceptable degradation
+            // (retry re-fires once the flight clears), not a silent success.
             return START_NOT_STICKY
         }
 
@@ -90,6 +95,7 @@ class FeedLoadService : Service() {
         setupBroadcastReceiver()
 
         val groupId = intent.getLongExtra(EXTRA_GROUP_ID, FeedGroupEntity.GROUP_ALL_ID)
+        currentGroupId = groupId
         loadingDisposable = feedLoadManager.startLoading(groupId)
             .observeOn(AndroidSchedulers.mainThread())
             .doOnSubscribe {
@@ -105,15 +111,29 @@ class FeedLoadService : Service() {
     }
 
     private fun disposeAll() {
-        unregisterReceiver(broadcastReceiver)
+        // Guard the lateinit receiver: a first-start destroy has nothing registered.
+        if (::broadcastReceiver.isInitialized) {
+            try {
+                unregisterReceiver(broadcastReceiver)
+            } catch (e: IllegalArgumentException) {
+                Log.w(TAG, "receiver already unregistered", e)
+            }
+        }
         loadingDisposable?.dispose()
+        loadingDisposable = null
         notificationDisposable?.dispose()
+        notificationDisposable = null
     }
 
     private fun stopService() {
         disposeAll()
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
         stopSelf()
+    }
+
+    override fun onDestroy() {
+        disposeAll()
+        super.onDestroy()
     }
 
     override fun onBind(intent: Intent): IBinder? {
@@ -179,13 +199,17 @@ class FeedLoadService : Service() {
         notificationBuilder.setProgress(state.maxProgress, state.currentProgress, state.maxProgress == -1)
 
         if (state.maxProgress == -1) {
-            if (state.updateDescription.isNotEmpty()) notificationBuilder.setContentText(state.updateDescription)
+            // Single set: an empty description clears stale text instead of keeping it.
             notificationBuilder.setContentText(state.updateDescription)
         } else {
             val progressText = state.currentProgress.toString() + "/" + state.maxProgress
 
+            // Single set like the indeterminate branch: an empty description clears
+            // stale text instead of keeping the previous channel beside fresh numbers.
             if (state.updateDescription.isNotEmpty()) {
                 notificationBuilder.setContentText("${state.updateDescription}  ($progressText)")
+            } else {
+                notificationBuilder.setContentText(progressText)
             }
         }
 
@@ -218,7 +242,7 @@ class FeedLoadService : Service() {
     // /////////////////////////////////////////////////////////////////////////
 
     private fun handleError(error: Throwable) {
-        postEvent(ErrorResultEvent(error))
+        postEvent(ErrorResultEvent(error, currentGroupId))
         stopService()
     }
 }

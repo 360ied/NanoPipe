@@ -19,6 +19,7 @@
 
 package org.schabi.newpipe.local.feed
 
+import android.animation.ObjectAnimator
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.Context
@@ -28,10 +29,12 @@ import android.graphics.Typeface
 import android.graphics.drawable.LayerDrawable
 import android.os.Bundle
 import android.os.Parcelable
+import android.os.SystemClock
 import android.text.Editable
 import android.text.TextWatcher
 import android.util.Log
 import android.view.*
+import android.view.animation.LinearInterpolator
 import android.view.inputmethod.InputMethodManager
 import android.widget.Button
 import android.widget.EditText
@@ -45,17 +48,25 @@ import androidx.core.content.edit
 import androidx.core.os.bundleOf
 import androidx.core.view.isVisible
 import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.lifecycleScope
 import androidx.preference.PreferenceManager
 import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.RecyclerView
+import com.google.android.material.snackbar.Snackbar
 import com.xwray.groupie.GroupieAdapter
 import com.xwray.groupie.Item
+import com.xwray.groupie.OnAsyncUpdateListener
 import com.xwray.groupie.OnItemClickListener
 import com.xwray.groupie.OnItemLongClickListener
 import io.reactivex.rxjava3.android.schedulers.AndroidSchedulers
 import io.reactivex.rxjava3.core.Single
 import io.reactivex.rxjava3.disposables.CompositeDisposable
 import io.reactivex.rxjava3.schedulers.Schedulers
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import org.schabi.newpipe.NewPipeDatabase
 import org.schabi.newpipe.R
 import org.schabi.newpipe.database.feed.model.FeedGroupEntity
@@ -77,6 +88,7 @@ import org.schabi.newpipe.ktx.animate
 import org.schabi.newpipe.ktx.animateHideRecyclerViewAllowingScrolling
 import org.schabi.newpipe.ktx.slideUp
 import org.schabi.newpipe.local.feed.item.StreamItem
+import org.schabi.newpipe.local.feed.service.FeedEventManager
 import org.schabi.newpipe.local.feed.service.FeedLoadService
 import org.schabi.newpipe.local.subscription.SubscriptionManager
 import org.schabi.newpipe.player.PlayerService
@@ -94,6 +106,7 @@ import org.schabi.newpipe.util.ThemeHelper.getItemViewMode
 import org.schabi.newpipe.util.ThemeHelper.resolveDrawable
 import org.schabi.newpipe.util.ThemeHelper.shouldUseGridLayout
 import java.time.OffsetDateTime
+import java.util.concurrent.TimeoutException
 import java.util.function.Consumer
 
 class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
@@ -116,6 +129,13 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
     private var updateListViewModeOnResume = false
     private var updatePullToRefreshOnResume = false
     private var isRefreshing = false
+    private var notLoadedDialog: AlertDialog? = null
+    private var feedNotAvailableDialog: AlertDialog? = null
+    private var infoItemDialog: InfoItemDialog? = null
+    private var snackbar: Snackbar? = null
+    private var refreshIconAnimator: ObjectAnimator? = null
+    // Slice 4: sequential single timerJob, viewLifecycleOwner-bound, cancelled in onDestroyView.
+    private var timerJob: Job? = null
 
     private var lastNewItemsCount = 0
 
@@ -134,6 +154,43 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
     private var filteredItems = mutableListOf<StreamItem>()
     private var isFilterEnabled = false
     private var isPullToRefreshEnabled = true
+
+    // Adapter writer serialization (slice 3b fix): Groupie's updateAsync diffs the passed
+    // list on a background thread, so every async push gets an ArrayList snapshot — the
+    // live originalItems/filteredItems keep mutating on keystrokes. Sync updates run only
+    // when no async diff is in flight; otherwise the keystroke joins the async generation
+    // chain (latest wins, stale diffs discarded) instead of clobbering it.
+    private var asyncUpdateInflight = 0
+
+    private fun pushAsync(items: List<StreamItem>, listener: OnAsyncUpdateListener?) {
+        val snapshot = ArrayList(items)
+        asyncUpdateInflight++
+        try {
+            groupAdapter.updateAsync(snapshot, false) {
+                asyncUpdateInflight--
+                try {
+                    listener?.onUpdateComplete()
+                } catch (e: Exception) {
+                    Log.e(TAG, "async update listener failed", e)
+                }
+            }
+        } catch (e: Exception) {
+            asyncUpdateInflight--
+            Log.e(TAG, "pushAsync failed", e)
+        }
+    }
+
+    private fun pushSyncOrAsync(items: List<StreamItem>) {
+        if (asyncUpdateInflight > 0) {
+            pushAsync(items, null)
+        } else {
+            try {
+                groupAdapter.update(ArrayList(items))
+            } catch (e: Exception) {
+                pushAsync(items, null)
+            }
+        }
+    }
 
     private val textWatcher = object : TextWatcher {
         override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
@@ -211,7 +268,75 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
         val factory = FeedViewModel.Factory(requireContext(), groupId)
         viewModel = ViewModelProvider(this, factory).get(FeedViewModel::class.java)
         showPlayedItems = viewModel.getShowPlayedItemsFromPreferences()
+        // Bundle backup for process death; rotation keeps the VM instance itself.
+        savedInstanceState?.getString("feedQuery")?.let { viewModel.savedQuery = it }
         viewModel.stateLiveData.observe(viewLifecycleOwner) { it?.let(::handleResult) }
+
+        // Slice 4: collect the pre-throttle timer ticks to cancel/relaunch timerJob.
+        // Retry on unexpected errors so one bad tick can't park the timers silently.
+        viewLifecycleOwner.lifecycleScope.launch {
+            while (isActive) {
+                try {
+                    viewModel.timerTicks.collect { event -> onScopedTimerTick(event) }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.w(TAG, "timerTicks collect ended, retrying", e)
+                    try {
+                        delay(1_000)
+                    } catch (ce: CancellationException) {
+                        throw ce
+                    }
+                }
+            }
+        }
+
+        // Slice 4 rotation re-derive: re-arm the phase-appropriate timer with the
+        // remaining delay, or re-show the sticky snackbar. First creation is a no-op
+        // (refreshRequestedAt is null until the first reloadContent).
+        try {
+            if (::viewModel.isInitialized && isAdded) {
+                val now = SystemClock.elapsedRealtime()
+                if (viewModel.failedSticky) {
+                    try {
+                        showRetrySnackbar()
+                    } catch (e: Exception) {
+                        Log.w(TAG, "sticky re-show has no view", e)
+                    }
+                    try {
+                        updateRefreshViewState()
+                    } catch (e: Exception) {
+                        // ignore: header best-effort on the sticky re-show path
+                    }
+                } else {
+                    val requestedAt = viewModel.refreshRequestedAt
+                    val lastProgressAt = viewModel.lastProgressAt
+                    val latest = viewModel.latestScopedEvent
+                    // Throttle-lag guard: latest already Progress but not yet stamped —
+                    // the 60 s leg owns this window, not an immediate 10 s trip.
+                    if (requestedAt != null && lastProgressAt == null &&
+                        latest !is FeedEventManager.Event.ProgressEvent
+                    ) {
+                        val remaining = TIMEOUT_NO_EVENT_MS - (now - requestedAt)
+                        if (remaining <= 0) {
+                            onRefreshTimeout("timeout10s-rearm-elapsed")
+                        } else {
+                            launchTimeout(remaining) { onRefreshTimeout("timeout10s-rearm") }
+                        }
+                    } else if (latest is FeedEventManager.Event.ProgressEvent) {
+                        val lastAt = lastProgressAt ?: requestedAt ?: now
+                        val remaining = TIMEOUT_NO_PROGRESS_MS - (now - lastAt)
+                        if (remaining <= 0) {
+                            onRefreshTimeout("timeout60s-rearm-elapsed")
+                        } else {
+                            launchTimeout(remaining) { onRefreshTimeout("timeout60s-rearm") }
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "timer re-arm failed", e)
+        }
 
         groupAdapter = GroupieAdapter().apply {
             setOnItemClickListener(listenerStreamItem)
@@ -283,8 +408,14 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
         feedBinding.refreshRootView.setOnClickListener { reloadContent() }
         feedBinding.refreshIcon.setOnClickListener { reloadContent() }
         feedBinding.refreshSubtitleText.setOnLongClickListener {
-            showNotLoadedSubscriptions()
-            true
+            // The subtitle is reused for filter-empty and failure text: only offer
+            // the not-loaded dialog when that is what it shows.
+            if (subtitleShowsNotLoaded) {
+                showNotLoadedSubscriptions()
+                true
+            } else {
+                false
+            }
         }
         feedBinding.swipeRefreshLayout.setOnRefreshListener { reloadContent() }
         feedBinding.newItemsLoadedButton.setOnClickListener {
@@ -497,6 +628,16 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
         tryGetNewItemsLoadedButton()?.clearAnimation()
 
         selection.setListener(null)
+        cancelTimer()
+        stopRefreshIconSpin()
+        notLoadedDialog?.dismiss()
+        notLoadedDialog = null
+        feedNotAvailableDialog?.dismiss()
+        feedNotAvailableDialog = null
+        infoItemDialog?.dismiss()
+        infoItemDialog = null
+        snackbar?.dismiss()
+        snackbar = null
         feedBinding.itemsList.adapter = null
         _feedBinding = null
         playlistControlBinding?.let { binding ->
@@ -520,6 +661,17 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
         super.onSaveInstanceState(outState)
         listState?.let { outState.putParcelable("listState", it) }
         outState.putBoolean("showPlayedItems", showPlayedItems)
+        try {
+            if (::viewModel.isInitialized) {
+                viewModel.savedQuery?.let { outState.putString("feedQuery", it) }
+            } else {
+                editText?.text?.toString()?.takeIf { it.isNotEmpty() }?.let {
+                    outState.putString("feedQuery", it)
+                }
+            }
+        } catch (e: Exception) {
+            // ignore: feed query is best-effort across recreation
+        }
         outState.putBundle("selection", Bundle().also { selection.saveState(it) })
     }
 
@@ -585,6 +737,12 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
         } catch (e: Exception) {
             // ignore
         }
+        try {
+            val restored = if (::viewModel.isInitialized) viewModel.savedQuery else null
+            if (!restored.isNullOrEmpty()) editText?.setText(restored)
+        } catch (e: Exception) {
+            // ignore
+        }
         editText?.addTextChangedListener(textWatcher)
 
         setupTouchListeners(feedBinding.root)
@@ -634,50 +792,82 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
         }
     }
 
-    private fun filterItems(text: String) {
-        isFilterEnabled = text.isNotEmpty()
-        filteredItems.clear()
-
-        if (text.isEmpty()) {
-            filteredItems.addAll(originalItems)
-        } else {
+    private fun rebuildFilteredList(query: String?) {
+        if (!query.isNullOrEmpty()) {
+            isFilterEnabled = true
+            filteredItems.clear()
             for (item in originalItems) {
                 val stream = item.streamWithState.stream
-                if (stream.title.lowercase().contains(text.lowercase()) ||
-                    stream.uploader.lowercase().contains(text.lowercase()) == true) {
+                if (stream.title.contains(query, ignoreCase = true) ||
+                    stream.uploader.contains(query, ignoreCase = true)) {
                     filteredItems.add(item)
                 }
             }
+        } else {
+            isFilterEnabled = false
+            filteredItems.clear()
+            filteredItems.addAll(originalItems)
         }
+    }
 
-        // Use synchronous update to avoid race conditions during rapid filtering
+    private fun filterItems(text: String) {
         try {
-            groupAdapter.update(if (isFilterEnabled) filteredItems else originalItems)
+            if (::viewModel.isInitialized) {
+                viewModel.savedQuery = text.ifEmpty { null }
+                viewModel.filterGeneration++
+            }
+        } catch (e: Exception) {
+        }
+        rebuildFilteredList(text.ifEmpty { null })
+
+        // Use synchronous update to avoid race conditions during rapid filtering.
+        // Joins the async chain while a refresh diff is in flight (see pushSyncOrAsync).
+        try {
+            pushSyncOrAsync(if (isFilterEnabled) filteredItems else originalItems)
         } catch (e: Exception) {
             // Fallback to async if needed
-            groupAdapter.updateAsync(if (isFilterEnabled) filteredItems else originalItems, null)
+            pushAsync(if (isFilterEnabled) filteredItems else originalItems, null)
         }
 
         // Always scroll to top when filter changes
-        feedBinding.itemsList.post {
-            feedBinding.itemsList.layoutManager?.scrollToPosition(0)
+        val itemsList = _feedBinding?.itemsList
+        itemsList?.post {
+            try {
+                itemsList.layoutManager?.scrollToPosition(0)
+            } catch (e: Exception) {
+                // ignore: scroll hint only, layout may be mid-update
+            }
         }
     }
 
     private fun clearFilter() {
+        try {
+            if (::viewModel.isInitialized) {
+                viewModel.savedQuery = null
+                viewModel.filterGeneration++
+            }
+        } catch (e: Exception) {
+            // ignore: filter affordance only, query continues unfiltered
+        }
         isFilterEnabled = false
         filteredItems.clear()
-        // Cancel any ongoing diff operations before starting a new one
+        // Join the async diff chain when one is in flight (see pushSyncOrAsync),
+        // otherwise a sync update would race the background DiffUtil pass.
         try {
             // Update synchronously to avoid race conditions
-            groupAdapter.update(originalItems)
+            pushSyncOrAsync(originalItems)
         } catch (e: Exception) {
             // Fallback to async with proper synchronization
-            groupAdapter.updateAsync(originalItems, null)
+            pushAsync(originalItems, null)
         }
         // Always scroll to top when clearing filter
-        feedBinding.itemsList.post {
-            feedBinding.itemsList.layoutManager?.scrollToPosition(0)
+        val itemsList = _feedBinding?.itemsList
+        itemsList?.post {
+            try {
+                itemsList.layoutManager?.scrollToPosition(0)
+            } catch (e: Exception) {
+                // ignore: scroll hint only, layout may be mid-update
+            }
         }
     }
 
@@ -713,17 +903,48 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
     // Handling
     // //////////////////////////////////////////////////////////////////////////
 
+    // View-lifetime memory of surfaced error sets: rotation (new view) re-fires,
+    // same-view re-renders with the same set do not. Reset on fresh reload.
+    private var lastSurfacedErrorSet: Set<String>? = null
+    // Whether the header subtitle currently shows not-loaded content: gates the
+    // long-press dialog, which would otherwise fire on unrelated subtitle text.
+    private var subtitleShowsNotLoaded = false
+
+    // Rows hidden behind a no-match filter still count as content: fullscreen
+    // first-start UI only when truly nothing is loaded and no filter hides it.
+    private fun hasVisibleOrHiddenContent(): Boolean {
+        return try {
+            (::groupAdapter.isInitialized && groupAdapter.itemCount > 0) ||
+                originalItems.isNotEmpty()
+        } catch (e: Exception) {
+            false
+        }
+    }
+
     override fun showLoading() {
         super.showLoading()
-        feedBinding.itemsList.animateHideRecyclerViewAllowingScrolling()
-        feedBinding.refreshRootView.animate(false, 0)
-        feedBinding.loadingProgressText.animate(true, 200)
-        feedBinding.swipeRefreshLayout.isRefreshing = true
+        val hasContent = hasVisibleOrHiddenContent()
+        if (!hasContent) {
+            feedBinding.itemsList.animateHideRecyclerViewAllowingScrolling()
+            feedBinding.refreshRootView.animate(false, 0)
+            feedBinding.loadingProgressText.animate(true, 200)
+        } else {
+            // Refresh-with-content: keep list + header, hide centered indicator.
+            feedBinding.loadingProgressBar.animate(false, 0)
+            feedBinding.loadingProgressText.animate(false, 0)
+        }
+        // Setting the swipe spinner while disabled still shows it on some versions.
+        if (isPullToRefreshEnabled) {
+            feedBinding.swipeRefreshLayout.isRefreshing = true
+        }
         isRefreshing = true
+        Log.d("FeedRefresh", "spinnerStart/showLoading@" + SystemClock.elapsedRealtime())
     }
 
     override fun hideLoading() {
         super.hideLoading()
+        stopRefreshIconSpin()
+        Log.d("FeedRefresh", "spinnerClear/hideLoading@" + SystemClock.elapsedRealtime())
         feedBinding.itemsList.animate(true, 0)
         feedBinding.refreshRootView.animate(true, 200)
         feedBinding.loadingProgressText.animate(false, 0)
@@ -733,16 +954,20 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
 
     override fun showEmptyState() {
         super.showEmptyState()
+        stopRefreshIconSpin()
+        Log.d("FeedRefresh", "spinnerClear/showEmptyState@" + SystemClock.elapsedRealtime())
         feedBinding.itemsList.animateHideRecyclerViewAllowingScrolling()
         feedBinding.refreshRootView.animate(true, 200)
         feedBinding.loadingProgressText.animate(false, 0)
         feedBinding.swipeRefreshLayout.isRefreshing = false
+        isRefreshing = false
         playlistControlBinding?.root?.isVisible = false
     }
 
     override fun handleResult(result: FeedState) {
         when (result) {
             is FeedState.ProgressState -> handleProgressState(result)
+            is FeedState.RefreshingState -> handleRefreshingState(result)
             is FeedState.LoadedState -> handleLoadedState(result)
             is FeedState.ErrorState -> if (handleErrorState(result)) return
         }
@@ -752,11 +977,133 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
 
     override fun handleError() {
         super.handleError()
-        feedBinding.itemsList.animateHideRecyclerViewAllowingScrolling()
-        feedBinding.refreshRootView.animate(false, 0)
+        stopRefreshIconSpin()
+        Log.d("FeedRefresh", "spinnerClear/handleError@" + SystemClock.elapsedRealtime())
+        val hasContent = hasVisibleOrHiddenContent()
+        if (!hasContent) {
+            feedBinding.itemsList.animateHideRecyclerViewAllowingScrolling()
+            feedBinding.refreshRootView.animate(false, 0)
+        }
         feedBinding.loadingProgressText.animate(false, 0)
         feedBinding.swipeRefreshLayout.isRefreshing = false
         isRefreshing = false
+    }
+
+    private fun handleRefreshingState(state: FeedState.RefreshingState) {
+        if (::groupAdapter.isInitialized && groupAdapter.itemCount == 0 &&
+            state.items.isNotEmpty()
+        ) {
+            // Rotation re-derive: repopulate kept rows from the replayed state.
+            // No celebration here — the terminal has not arrived yet.
+            val itemVersion = try {
+                when (getItemViewMode(requireContext())) {
+                    ItemViewMode.GRID -> StreamItem.ItemVersion.GRID
+                    ItemViewMode.CARD -> StreamItem.ItemVersion.CARD
+                    else -> StreamItem.ItemVersion.NORMAL
+                }
+            } catch (e: Exception) {
+                StreamItem.ItemVersion.NORMAL
+            }
+            state.items.forEach { it.itemVersion = itemVersion }
+            originalItems.clear()
+            originalItems.addAll(state.items)
+            selection.retainOnly(state.items.map { it.streamWithState.stream.uid })
+            state.items.forEach {
+                it.isItemSelected = selection.isSelected(it.streamWithState.stream.uid)
+            }
+            val query = try {
+                viewModel.savedQuery?.takeIf { it.isNotEmpty() }
+            } catch (e: Exception) {
+                null
+            }
+            rebuildFilteredList(query)
+            val shown = if (isFilterEnabled) filteredItems else originalItems
+            pushAsync(shown, null)
+            listState?.run {
+                try {
+                    feedBinding.itemsList.layoutManager?.onRestoreInstanceState(listState)
+                } catch (e: Exception) {
+                }
+                listState = null
+            }
+            playlistControlBinding?.root?.isVisible = shown.isNotEmpty()
+        }
+        showLoading()
+        updateRefreshingHeader(state)
+        startRefreshIconSpin()
+    }
+
+    private fun updateRefreshingHeader(state: FeedState.RefreshingState) {
+        val refreshingText: String? = when {
+            state.maxProgress > 0 && state.currentProgress >= 0 ->
+                getString(
+                    R.string.feed_refreshing_progress,
+                    state.currentProgress,
+                    state.maxProgress
+                )
+            state.maxProgress > 0 && state.currentProgress == -1 -> {
+                Log.d(
+                    "FeedRefresh",
+                    "mixed progress current=-1 max=${state.maxProgress}"
+                )
+                getString(R.string.feed_refreshing_progress, 0, state.maxProgress)
+            }
+            state.progressMessage != 0 -> getString(state.progressMessage)
+            else -> null
+        }
+        val combinedText: String? = if (
+            refreshingText != null && state.notLoadedCount > 0
+        ) {
+            getString(
+                R.string.feed_refreshing_with_not_loaded,
+                refreshingText,
+                getString(
+                    R.string.feed_subscription_not_loaded_count,
+                    state.notLoadedCount
+                )
+            )
+        } else {
+            refreshingText
+        }
+        if (combinedText != null) {
+            feedBinding.refreshSubtitleText.isVisible = true
+            feedBinding.refreshSubtitleText.text = combinedText
+            feedBinding.refreshSubtitleText.contentDescription = combinedText
+            subtitleShowsNotLoaded = state.notLoadedCount > 0
+        } else {
+            feedBinding.refreshSubtitleText.isVisible = false
+            feedBinding.refreshSubtitleText.text = ""
+            feedBinding.refreshSubtitleText.contentDescription = null
+            subtitleShowsNotLoaded = false
+        }
+    }
+
+    private fun startRefreshIconSpin() {
+        try {
+            val view = _feedBinding?.refreshIcon ?: return
+            if (refreshIconAnimator?.isRunning == true) return
+            refreshIconAnimator?.cancel()
+            refreshIconAnimator = ObjectAnimator.ofFloat(view, "rotation", 0f, 360f).apply {
+                duration = 1000
+                interpolator = LinearInterpolator()
+                repeatCount = ObjectAnimator.INFINITE
+                start()
+            }
+        } catch (e: Exception) {
+            Log.w("FeedRefresh", "spin start failed", e)
+        }
+    }
+
+    private fun stopRefreshIconSpin() {
+        try {
+            refreshIconAnimator?.cancel()
+        } catch (e: Exception) {
+        }
+        refreshIconAnimator = null
+        try {
+            _feedBinding?.refreshIcon?.rotation = 0f
+        } catch (e: Exception) {
+        }
     }
 
     private fun handleProgressState(progressState: FeedState.ProgressState) {
@@ -766,7 +1113,12 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
             progressState.maxProgress == -1
 
         feedBinding.loadingProgressText.text = if (!isIndeterminate) {
-            "${progressState.currentProgress}/${progressState.maxProgress}"
+            val current = if (progressState.maxProgress > 0 && progressState.currentProgress == -1) {
+                0
+            } else {
+                progressState.currentProgress
+            }
+            "$current/${progressState.maxProgress}"
         } else if (progressState.progressMessage > 0) {
             getString(progressState.progressMessage)
         } else {
@@ -775,9 +1127,13 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
 
         feedBinding.loadingProgressBar.isIndeterminate = isIndeterminate ||
             (progressState.maxProgress > 0 && progressState.currentProgress == 0)
-        feedBinding.loadingProgressBar.progress = progressState.currentProgress
-
-        feedBinding.loadingProgressBar.max = progressState.maxProgress
+        // Never write negatives: setMax(-1) corrupts the bar even when indeterminate.
+        if (progressState.currentProgress >= 0) {
+            feedBinding.loadingProgressBar.progress = progressState.currentProgress
+        }
+        if (progressState.maxProgress >= 0) {
+            feedBinding.loadingProgressBar.max = progressState.maxProgress
+        }
     }
 
     private fun showInfoItemDialog(item: StreamInfoItem) {
@@ -785,7 +1141,9 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
         val activity: Activity? = getActivity()
         if (context == null || context.resources == null || activity == null) return
 
-        InfoItemDialog.Builder(activity, context, this, item).create().show()
+        infoItemDialog?.dismiss()
+        infoItemDialog = InfoItemDialog.Builder(activity, context, this, item).create()
+        infoItemDialog?.show()
     }
 
     private val listenerStreamItem = object : OnItemClickListener, OnItemLongClickListener {
@@ -794,7 +1152,7 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
                 selection.toggle(item.streamWithState.stream.uid)
                 return
             }
-            if (item is StreamItem && !isRefreshing) {
+            if (item is StreamItem) {
                 val stream = item.streamWithState.stream
 
                 if (autoBackgroundPlaying) {
@@ -816,7 +1174,7 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
         }
 
         override fun onItemLongClick(item: Item<*>, view: View): Boolean {
-            if (item is StreamItem && !isRefreshing) {
+            if (item is StreamItem) {
                 showInfoItemDialog(item.streamWithState.stream.toStreamInfoItem())
                 return true
             }
@@ -826,6 +1184,29 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
 
     @SuppressLint("StringFormatMatches")
     private fun handleLoadedState(loadedState: FeedState.LoadedState) {
+        // Stale-render guard: a pre-load LoadedState replayed after rotation (or a
+        // replay under a tripped sticky) must not kill the armed timer or dismiss
+        // the failure snackbar — the terminal for the current load has not rendered
+        // yet. Generations distinguish current terminals from stale replays.
+        val keepFailureUI = try {
+            viewModel.failedSticky ||
+                viewModel.terminalGeneration < viewModel.loadGeneration
+        } catch (e: Exception) {
+            false
+        }
+        if (!keepFailureUI) {
+            // Terminal render owns the spinner from here: a live timeout would post a
+            // bogus retry snackbar if the tick path ever misses it.
+            cancelTimer()
+            snackbar?.dismiss()
+        }
+        // Scoped celebration (slice 3b): only a fresh non-cancelled Success sets the
+        // pending flag; DB-only recombines never do. Selection skips + freezes the count.
+        val celebrate = try {
+            viewModel.consumeCelebration() && !selection.isActive
+        } catch (e: Exception) {
+            !selection.isActive
+        }
         val itemVersion = when (getItemViewMode(requireContext())) {
             ItemViewMode.GRID -> StreamItem.ItemVersion.GRID
             ItemViewMode.CARD -> StreamItem.ItemVersion.CARD
@@ -838,59 +1219,272 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
         selection.retainOnly(loadedState.items.map { it.streamWithState.stream.uid })
         loadedState.items.forEach { it.isItemSelected = selection.isSelected(it.streamWithState.stream.uid) }
 
-        // Store original items for filtering
+        // Store original items for filtering; re-apply the saved query without scroll jump
+        // (never via filterItems, which scrolls to top).
         originalItems.clear()
         originalItems.addAll(loadedState.items)
-        filteredItems.clear()
-        filteredItems.addAll(originalItems)
+        val query = try {
+            viewModel.savedQuery?.takeIf { it.isNotEmpty() }
+        } catch (e: Exception) {
+            null
+        } ?: editText?.text?.toString()?.takeIf { it.isNotEmpty() }
+        rebuildFilteredList(query)
+        val shownItems = if (isFilterEnabled) filteredItems else originalItems
+        val unfilteredEmpty = loadedState.items.isEmpty()
+        val filteredEmpty = !unfilteredEmpty && shownItems.isEmpty()
 
-        playlistControlBinding?.root?.isVisible = loadedState.items.isNotEmpty()
+        // Playlist follows the shown (filtered when filtering) size.
+        playlistControlBinding?.root?.isVisible = shownItems.isNotEmpty()
 
         // This need to be saved in a variable as the update occurs async
         val oldOldestSubscriptionUpdate = oldestSubscriptionUpdate
+        val applyGen = try {
+            viewModel.filterGeneration
+        } catch (e: Exception) {
+            -1L
+        }
 
-        groupAdapter.updateAsync(loadedState.items, false) {
-            oldOldestSubscriptionUpdate?.run {
-                highlightNewItemsAfter(oldOldestSubscriptionUpdate)
+        if (filteredEmpty) {
+            // Filtered-empty: visible empty list, hidden playlist, no celebration.
+            pushAsync(shownItems, null)
+        } else {
+            pushAsync(shownItems) {
+                if (!celebrate) return@pushAsync
+                val stillCurrent = try {
+                    viewModel.filterGeneration == applyGen
+                } catch (e: Exception) {
+                    true
+                }
+                if (!stillCurrent) return@pushAsync
+                oldOldestSubscriptionUpdate?.run {
+                    highlightNewItemsAfter(oldOldestSubscriptionUpdate)
+                }
             }
         }
         listState?.run {
-            feedBinding.itemsList.layoutManager?.onRestoreInstanceState(listState)
+            try {
+                feedBinding.itemsList.layoutManager?.onRestoreInstanceState(listState)
+            } catch (e: Exception) {
+            }
             listState = null
         }
 
-        val feedsNotLoaded = loadedState.notLoadedCount > 0
-        feedBinding.refreshSubtitleText.isVisible = feedsNotLoaded
-        if (feedsNotLoaded) {
-            feedBinding.refreshSubtitleText.text = getString(
-                R.string.feed_subscription_not_loaded_count,
-                loadedState.notLoadedCount
-            )
+        if (filteredEmpty) {
+            feedBinding.refreshSubtitleText.isVisible = true
+            feedBinding.refreshSubtitleText.text = getString(R.string.feed_no_filter_results)
+            feedBinding.refreshSubtitleText.contentDescription =
+                getString(R.string.feed_no_filter_results)
+            // The subtitle promises a clear action — tapping exits search.
+            feedBinding.refreshSubtitleText.setOnClickListener {
+                try {
+                    destroyCustomViewInActionBar()
+                } catch (e: Exception) {
+                }
+            }
+            subtitleShowsNotLoaded = false
+        } else {
+            feedBinding.refreshSubtitleText.setOnClickListener(null)
+            val feedsNotLoaded = loadedState.notLoadedCount > 0
+            subtitleShowsNotLoaded = feedsNotLoaded
+            feedBinding.refreshSubtitleText.isVisible = feedsNotLoaded
+            if (feedsNotLoaded) {
+                feedBinding.refreshSubtitleText.text = getString(
+                    R.string.feed_subscription_not_loaded_count,
+                    loadedState.notLoadedCount
+                )
+            }
         }
 
-        if (oldestSubscriptionUpdate != loadedState.oldestUpdate ||
-            (oldestSubscriptionUpdate == null && loadedState.oldestUpdate == null)
-        ) {
-            // ignore errors if they have already been handled for the current update
+        // Re-render guard (pass 2): the VM dedupes across terminals, but re-rendering
+        // the same LoadedState (view-mode toggle, rotation replay) bypasses it.
+        // Surface only when the set changed since this view last surfaced it.
+        // Rotation re-surface is intentional: the dialog died with the old view.
+        val errorSet = try {
+            viewModel.errorSetKey(loadedState.itemsErrors)
+        } catch (e: Exception) {
+            null
+        }
+        if (errorSet != null && errorSet != lastSurfacedErrorSet) {
+            lastSurfacedErrorSet = errorSet
             handleItemsErrors(loadedState.itemsErrors)
         }
         oldestSubscriptionUpdate = loadedState.oldestUpdate
 
-        if (loadedState.items.isEmpty()) {
+        if (unfilteredEmpty) {
             showEmptyState()
         } else {
+            // Filtered-empty also settles here: visible RV with 0 rows, empty view hidden.
             hideLoading()
         }
     }
 
     private fun handleErrorState(errorState: FeedState.ErrorState): Boolean {
+        cancelTimer()
+        // Defensive null branch: the VM never posts ErrorState(null) today.
         return if (errorState.error == null) {
             hideLoading()
             false
-        } else {
+        } else if (!hasVisibleOrHiddenContent()) {
             showError(ErrorInfo(errorState.error, UserAction.REQUESTED_FEED, "Loading feed"))
             true
+        } else {
+            // Fatal-with-content: keep stale list + header, offer snackbar + header retry.
+            // failedSticky lives in the VM (set on the scoped Error pass-through).
+            hideLoading()
+            updateRefreshViewState()
+            showFatalSnackbar(errorState.error)
+            true
         }
+    }
+
+    private fun showRetrySnackbar() {
+        if (snackbar?.isShown == true) return
+        val root: View = _feedBinding?.itemsList ?: requireView()
+        snackbar = Snackbar.make(
+            root,
+            getString(R.string.feed_load_error),
+            Snackbar.LENGTH_LONG
+        ).setAction(getString(R.string.retry)) { reloadContent() }
+        snackbar?.show()
+    }
+
+    private fun showFatalSnackbar(error: Throwable) {
+        if (snackbar?.isShown == true) return
+        // UX stays generic by design; the specifics go to logcat (not the panel).
+        Log.e(TAG, "feed refresh fatal-with-content", error)
+        try {
+            showRetrySnackbar()
+        } catch (e: Exception) {
+            try {
+                ErrorUtil.showSnackbar(
+                    this,
+                    ErrorInfo(error, UserAction.REQUESTED_FEED, "Loading feed")
+                )
+            } catch (e: Exception) {
+            }
+        }
+    }
+
+    // Slice 4 timers: sequential single timerJob. Ticks arrive pre-throttle via the VM
+    // push channel; terminal ticks cancel, Progress ticks (re)launch the 60 s leg.
+    private fun cancelTimer() {
+        try {
+            timerJob?.cancel()
+        } catch (e: Exception) {
+        }
+        timerJob = null
+    }
+
+    private fun launchTimeout(delayMs: Long, onTrip: () -> Unit) {
+        cancelTimer()
+        val scope = try {
+            viewLifecycleOwner.lifecycleScope
+        } catch (e: Exception) {
+            return
+        }
+        timerJob = scope.launch {
+            try {
+                delay(delayMs)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                return@launch
+            }
+            if (!isAdded) return@launch
+            onTrip()
+        }
+    }
+
+    private fun onRefreshTimeout(reason: String) {
+        timerJob = null
+        if (!isAdded || _feedBinding == null) return
+        // Narrow terminal race: a terminal queued behind this task already settled
+        // the load — don't resurrect a failure on top of fresh content.
+        val awaiting = try {
+            val latest = viewModel.latestScopedEvent
+            latest is FeedEventManager.Event.ProgressEvent ||
+                (viewModel.refreshRequestedAt != null && viewModel.lastProgressAt == null)
+        } catch (e: Exception) {
+            true
+        }
+        if (!awaiting) return
+        try {
+            viewModel.onNoProgressTimeout()
+        } catch (e: Exception) {
+        }
+        // Panel and snackbar are alternative affordances (never both, like the
+        // fatal path): the panel persists, the snackbar is for the sticky case.
+        val panelShown = if (!hasVisibleOrHiddenContent()) {
+            // No-content timeout mirrors the fatal path: clear the spinners, then
+            // show the error panel — no later render carries a retry, so without
+            // the panel the screen would go blank once the snackbar dismisses.
+            handleError()
+            showError(
+                ErrorInfo(
+                    TimeoutException("feed refresh timed out"),
+                    UserAction.REQUESTED_FEED,
+                    "Loading feed"
+                )
+            )
+            true
+        } else {
+            isRefreshing = false
+            try {
+                feedBinding.swipeRefreshLayout.isRefreshing = false
+            } catch (e: Exception) {
+            }
+            stopRefreshIconSpin()
+            false
+        }
+        Log.d("FeedRefresh", "spinnerClear/" + reason + "@" + SystemClock.elapsedRealtime())
+        try {
+            updateRefreshViewState()
+        } catch (e: Exception) {
+        }
+        if (!panelShown) {
+            try {
+                showRetrySnackbar()
+            } catch (e: Exception) {
+                Log.w(TAG, "stuck snackbar has no view", e)
+            }
+        }
+    }
+
+    private fun onScopedTimerTick(event: FeedEventManager.Event) {
+        if (!isAdded || _feedBinding == null) return
+        cancelTimer()
+        if (event is FeedEventManager.Event.ProgressEvent) {
+            val sticky = try {
+                viewModel.failedSticky
+            } catch (e: Exception) {
+                false
+            }
+            if (sticky) {
+                // Late arrival after a failure: re-light, dismiss the stuck snackbar,
+                // resume 60 s tracking. Sticky clears on the terminal, not here.
+                isRefreshing = true
+                startRefreshIconSpin()
+                if (isPullToRefreshEnabled) {
+                    try {
+                        feedBinding.swipeRefreshLayout.isRefreshing = true
+                    } catch (e: Exception) {
+                    }
+                }
+                Log.d(
+                    "FeedRefresh",
+                    "spinnerStart/lateArrival@" + SystemClock.elapsedRealtime()
+                )
+                try {
+                    snackbar?.dismiss()
+                } catch (e: Exception) {
+                }
+            }
+            // Full 60 s from the tick ~= the remaining-delay formula: the VM stamps
+            // lastProgressAt post-throttle in map(), so a tick runs ~throttle + one
+            // scheduler hop ahead of the stamp.
+            launchTimeout(TIMEOUT_NO_PROGRESS_MS) { onRefreshTimeout("timeout60s") }
+        }
+        // Terminal ticks: the render path owns the spinner; nothing to arm.
     }
 
     private fun handleItemsErrors(errors: List<Throwable>) {
@@ -935,11 +1529,13 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
                 .observeOn(AndroidSchedulers.mainThread())
                 .subscribe(
                     { subscriptions ->
+                        if (!isAdded) return@subscribe
                         if (subscriptions.isEmpty()) {
                             return@subscribe
                         }
 
-                        AlertDialog.Builder(requireContext())
+                        notLoadedDialog?.dismiss()
+                        notLoadedDialog = AlertDialog.Builder(requireContext())
                             .setTitle(
                                 getString(
                                     R.string.feed_subscription_not_loaded_count,
@@ -960,7 +1556,8 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
                                 }
                             }
                             .setNegativeButton(R.string.cancel, null)
-                            .show()
+                            .create()
+                        notLoadedDialog?.show()
                     },
                     { throwable -> Log.e(TAG, "Unable to load failed subscriptions", throwable) }
                 )
@@ -972,6 +1569,7 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
         @Nullable cause: Throwable?,
         nextItemsErrors: List<Throwable>
     ) {
+        if (!isAdded) return
         val sharedPreferences = PreferenceManager.getDefaultSharedPreferences(requireContext())
         val isFastFeedModeEnabled = sharedPreferences.getBoolean(
             getString(R.string.feed_use_dedicated_fetch_method_key), false
@@ -1004,7 +1602,11 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
                 message += "\n" + cause.message
             }
         }
-        builder.setMessage(message).create().show()
+        builder.setMessage(message).create().let { dialog ->
+            feedNotAvailableDialog?.dismiss()
+            feedNotAvailableDialog = dialog
+            dialog.show()
+        }
     }
 
     private fun updateRelativeTimeViews() {
@@ -1018,8 +1620,41 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
     private fun updateRefreshViewState() {
         feedBinding.refreshText.text = getString(
             R.string.feed_oldest_subscription_update,
-            oldestSubscriptionUpdate?.let { Localization.relativeTime(it) } ?: "—"
+            oldestSubscriptionUpdate?.let { Localization.relativeTime(it) } ?: "\u2014"
         )
+        val sticky = try {
+            ::viewModel.isInitialized && viewModel.failedSticky
+        } catch (e: Exception) {
+            false
+        }
+        // A resumed load (late arrival re-lit the spinner) shows live progress
+        // instead of the failure text until its terminal settles.
+        if (sticky && !isRefreshing) {
+            feedBinding.refreshSubtitleText.isVisible = true
+            feedBinding.refreshSubtitleText.text =
+                getString(R.string.feed_refresh_failed_tap_to_retry)
+            feedBinding.refreshSubtitleText.contentDescription =
+                getString(R.string.feed_refresh_failed_tap_to_retry)
+            feedBinding.refreshRootView.contentDescription =
+                getString(R.string.feed_refresh_failed_tap_to_retry)
+            // The subtitle listener belongs to the filter-empty state (set in
+            // handleLoadedState): a sticky overwrite must not inherit its action.
+            feedBinding.refreshSubtitleText.setOnClickListener(null)
+            subtitleShowsNotLoaded = false
+            feedBinding.refreshIcon.contentDescription =
+                getString(R.string.feed_refresh_failed_tap_to_retry)
+            feedBinding.refreshIcon.isFocusable = false
+        } else {
+            feedBinding.refreshRootView.contentDescription = null
+            feedBinding.refreshIcon.contentDescription = null
+            feedBinding.refreshIcon.isFocusable = true
+            if (feedBinding.refreshSubtitleText.isVisible) {
+                feedBinding.refreshSubtitleText.contentDescription =
+                    feedBinding.refreshSubtitleText.text
+            } else {
+                feedBinding.refreshSubtitleText.contentDescription = null
+            }
+        }
     }
 
     /**
@@ -1140,6 +1775,41 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
     override fun doInitialLoadLogic() {}
 
     override fun reloadContent() {
+        // Re-tap while a load is in flight re-fires into the single-flight drop with
+        // no feedback: timestamps and timers continue under the first load.
+        val duplicate = isRefreshing
+        if (!duplicate) {
+            try {
+                if (::viewModel.isInitialized) {
+                    viewModel.onReloadRequested(SystemClock.elapsedRealtime())
+                }
+            } catch (e: Exception) {
+            }
+            // Fresh reload re-arms error surfacing: the VM dedupes per load,
+            // the view per render — both reset together.
+            lastSurfacedErrorSet = null
+        }
+        if (_feedBinding != null && !duplicate) {
+            try {
+                hideErrorPanel()
+            } catch (e: Exception) {
+            }
+            snackbar?.dismiss()
+            isRefreshing = true
+            if (isPullToRefreshEnabled) {
+                try {
+                    feedBinding.swipeRefreshLayout.isRefreshing = true
+                } catch (e: Exception) {
+                }
+            }
+            Log.d("FeedRefresh", "spinnerStart/reload@" + SystemClock.elapsedRealtime())
+            try {
+                updateRefreshViewState()
+            } catch (e: Exception) {
+            }
+            // Arm the 10 s no-event leg; the first scoped Progress swaps it for 60 s.
+            launchTimeout(TIMEOUT_NO_EVENT_MS) { onRefreshTimeout("timeout10s") }
+        }
         hideNewItemsLoaded(false)
 
         getActivity()?.startService(
@@ -1147,12 +1817,18 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
                 putExtra(FeedLoadService.EXTRA_GROUP_ID, groupId)
             }
         )
-        listState = null
+        // Duplicate taps must not destroy the pending scroll restore: the eventual
+        // terminal belongs to the first load.
+        if (!duplicate) {
+            listState = null
+        }
     }
 
     companion object {
         const val KEY_GROUP_ID = "ARG_GROUP_ID"
         const val KEY_GROUP_NAME = "ARG_GROUP_NAME"
+        private const val TIMEOUT_NO_EVENT_MS = 10_000L
+        private const val TIMEOUT_NO_PROGRESS_MS = 60_000L
 
         @JvmStatic
         fun newInstance(groupId: Long = FeedGroupEntity.GROUP_ALL_ID, groupName: String? = null): FeedFragment {
