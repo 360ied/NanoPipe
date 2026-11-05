@@ -17,14 +17,13 @@ def keyPath = System.getenv("KEY_PATH") ?: keystoreProps.getProperty("storeFile"
 def keyStorePassword = System.getenv("KEY_STORE_PASSWORD") ?: keystoreProps.getProperty("storePassword")
 def signingKeyAlias = System.getenv("KEY_ALIAS") ?: keystoreProps.getProperty("keyAlias")
 def signingKeyPassword = System.getenv("KEY_PASSWORD") ?: keystoreProps.getProperty("keyPassword")
-def baseVersionCode = 1110
 // versionName is tag-driven (see AGENTS.md "Versioning"): the release
 // tag is the single source of truth. Never hardcode appVersionName.
 def gitDescribeRaw
 try {
     gitDescribeRaw = providers.exec {
         // --always: never fails for missing tags; falls back to a bare
-        // commit hash when no tag is reachable (e.g. CI checkout without
+        // commit hash when no tag is reachable (e.g. shallow checkout without
         // fetch-tags). Still requires a git checkout (see fallback below).
         // --dirty marks uncommitted changes; the dual --match accepts both
         // v-prefixed and legacy bare tags.
@@ -37,11 +36,48 @@ try {
 }
 // Strip the leading 'v' so the tag prefix never leaks into versionName.
 def appVersionName = gitDescribeRaw.replaceFirst(/^v(?=\d)/, "")
+// versionCode is tag-derived (see AGENTS.md "Versioning"): the release tag
+// is the single source of truth, same as versionName. Never hardcode it.
+//
+// Mapping: 200000 + (major * 1000000 + minor * 1000 + patch) * 100 + slot,
+// where finals take slot 99 and betaN takes slot N (cap 98). The 200000
+// offset keeps every real code above all previously shipped codes (111000),
+// so releases always install as upgrades; the *100 leaves room for betas.
+// Describe suffixes do not affect the code: -dirty (worktree state) and
+// -N-gHASH (distance from tag) are stripped, so dev builds share their base
+// tag's code and dev<->release reinstalls always succeed in both directions.
+// Checkouts with no version info (bare hash from --always, 0.0.0-unknown)
+// keep the sentinel below; tag-shaped but non-semver tags (e.g. -rc1) fail
+// loudly instead of silently shipping the sentinel.
+def fallbackVersionCode = 111000
+def tagVersionCode = fallbackVersionCode
+if (gitDescribeRaw != "0.0.0-unknown") {
+    def tagCore = gitDescribeRaw.replaceFirst(/-dirty$/, "").replaceFirst(/-\d+-g[0-9a-f]+$/, "")
+    def tagMatcher = tagCore =~ /^v?(\d+)\.(\d+)\.(\d+)(?:-beta(\d+))?$/
+    if (tagMatcher.matches()) {
+        def major = tagMatcher[0][1] as int
+        def minor = tagMatcher[0][2] as int
+        def patch = tagMatcher[0][3] as int
+        def slot = 99
+        if (tagMatcher[0][4] != null) {
+            slot = tagMatcher[0][4] as int
+            if (slot > 98) {
+                throw new GradleException("beta number ${slot} has no versionCode slot (finals use 99)")
+            }
+        }
+        // Long arithmetic: major * 1000000 * 100 overflows int well below
+        // the 2100000000 ceiling the range check below enforces.
+        tagVersionCode = 200000L + (major * 1000000L + minor * 1000L + patch) * 100L + slot
+        if (tagVersionCode <= 111000 || tagVersionCode > 2100000000) {
+            throw new GradleException("versionCode ${tagVersionCode} out of range")
+        }
+    } else if ((tagCore =~ /\d+\.\d+\.\d+/).find()) {
+        throw new GradleException("unparseable release tag '${gitDescribeRaw}': use X.Y.Z or X.Y.Z-betaN")
+    }
+}
 // Single universal APK: ABI splits were dropped with ffmpeg-kit (the per-ABI
-// APKs were identical apart from a ~10 KB transitive AndroidX .so). The x100
-// scale is kept so the versionCode stays above the old per-ABI split codes
-// (100 * 1109 + abi, max 110904) and existing installs still update.
-def universalVersionCode = 100 * baseVersionCode
+// APKs were identical apart from a ~10 KB transitive AndroidX .so).
+def universalVersionCode = tagVersionCode as int
 
 android {
     compileSdk 37

@@ -32,8 +32,9 @@ vestigial, and not applicable here.
 
 ## Design (as implemented)
 
-Ports only the `versionName`-from-tag half. Keeps `versionCode` exactly
-as-is.
+Ports the `versionName`-from-tag half (plus hardening), and derives
+`versionCode` from the same tag — same git dependence, no new failure
+modes for version-less checkouts.
 
 ### 1. `PipePipeClient/app/build.gradle` (~10 lines)
 
@@ -62,6 +63,15 @@ def appVersionName = gitDescribeRaw.replaceFirst(/^v(?=\d)/, "")
 Hardened after pedantic review: a `--dirty` flag and a `try/catch`
 fallback to `0.0.0-unknown` — see the build file for the final form.
 
+`versionCode` is derived from the same `gitDescribeRaw` (mapping:
+`200000 + (major * 1000000 + minor * 1000 + patch) * 100 + slot`,
+finals take slot 99, `betaN` takes slot N capped at 98). `-dirty` and
+`-N-gHASH` distance are stripped first, so dev builds share their base
+tag's code. No version info (bare hash, `0.0.0-unknown`) keeps the
+`111000` sentinel — below every real code, so real releases always
+install as upgrades. Tag-shaped but non-semver tags (e.g. `-rc1`) fail
+the build loudly instead of silently shipping the sentinel.
+
 Everything downstream keeps working unchanged: `versionName
 appVersionName`, the APK filename
 (`NanoPipe_${gitDescribeRaw}-${variant.name}.apk`, raw tag with the `v`
@@ -75,10 +85,9 @@ Deliberately not ported from mumla:
   (`5.5.0-beta3` splits to `5.5.0`). PipePipe has no `VERSIONTAG`
   consumer, so skip it.
 - `versionCode 3070300` and the `XYYZZbb` / news-items bookkeeping:
-  no equivalent exists here. `universalVersionCode` (`100 *
-  baseVersionCode`, kept above the legacy per-ABI split codes) stays
-  frozen; bump `baseVersionCode` only if store-style upgrade ordering
-  ever requires it.
+  no equivalent exists here. Instead `versionCode` is tag-derived (see
+  §1), so every release stays distinguishable to installers while
+  remaining above all previously shipped codes.
 
 On the configuration-cache concern: the existing comment in
 `build.gradle` warns against *eager* git probing at configuration
@@ -129,9 +138,12 @@ mumla's section minus the code parts:
   leading `v` stripped. Never hardcode `appVersionName`.
 - **Release tagging**: `git tag -a v<version> -m "Release v<version>"`
   (e.g. `v5.5.0-beta4`). The `v` prefix is canonical.
-- **versionCode**: frozen at `100 * baseVersionCode` (stays above legacy
-  per-ABI codes). Bump `baseVersionCode` only if store-style upgrade
-  ordering ever requires it; it is not tied to tags.
+- **versionCode**: derived from the release tag in
+  `PipePipeClient/app/build.gradle` (`200000 + (major*1000000 +
+  minor*1000 + patch)*100 + slot`; `slot` 99 for finals, N for `betaN`
+  capped at 98). `-dirty` and describe distance do not affect the code.
+  Checkouts with no version info fall back to the `111000` sentinel;
+  tag-shaped but non-semver tags fail the build.
 ```
 
 ## Verification
@@ -159,6 +171,12 @@ This landed as a worktree change, verified before review:
   separate Maven-style coordinate and out of scope.
 
 ## Decisions (resolved)
+
+- Derive `versionCode` from the tag at build time (audit P0-2): the
+  build already depends on git history for `versionName`, so this adds
+  no new dependence — and keeping it in Gradle (not baked at release
+  time) means no human has to remember a number. Distance/`-dirty`
+  are ignored so dev↔release reinstalls always succeed.
 
 - Bootstrap with a `v0.0.0` genesis tag rather than backdating
   `v5.5.0-beta3`: current `main` was never a release cut.

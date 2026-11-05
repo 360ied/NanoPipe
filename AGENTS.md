@@ -90,10 +90,12 @@ other automation runs these gates; enforcement is manual — running
   (`NanoPipe_<tag>-<variant>.apk`), not the runtime `versionName`, so
   it never carries `-debug`/`-dirty`; the variant name already
   disambiguates.
-- **versionCode**: frozen at `100 * baseVersionCode` (stays above the
-  legacy per-ABI split codes). Bump `baseVersionCode` only if
-  store-style upgrade ordering ever requires it; it is not tied to
-  tags.
+- **versionCode**: derived from the release tag in
+  `PipePipeClient/app/build.gradle`: `200000 + (major*1000000 +
+  minor*1000 + patch)*100 + slot` (`slot` 99 for finals, N for `betaN`
+  capped at 98). `-dirty` and describe distance do not affect the code.
+  Checkouts with no version info fall back to the `111000` sentinel;
+  tag-shaped but non-semver tags fail the build.
 
 ## Code Review
 
