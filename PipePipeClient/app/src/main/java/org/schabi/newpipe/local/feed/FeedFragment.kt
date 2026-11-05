@@ -54,6 +54,7 @@ import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.snackbar.Snackbar
 import com.xwray.groupie.GroupieAdapter
 import com.xwray.groupie.Item
+import com.xwray.groupie.OnAsyncUpdateListener
 import com.xwray.groupie.OnItemClickListener
 import com.xwray.groupie.OnItemLongClickListener
 import io.reactivex.rxjava3.android.schedulers.AndroidSchedulers
@@ -143,6 +144,43 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
     private var filteredItems = mutableListOf<StreamItem>()
     private var isFilterEnabled = false
     private var isPullToRefreshEnabled = true
+
+    // Adapter writer serialization (slice 3b fix): Groupie's updateAsync diffs the passed
+    // list on a background thread, so every async push gets an ArrayList snapshot — the
+    // live originalItems/filteredItems keep mutating on keystrokes. Sync updates run only
+    // when no async diff is in flight; otherwise the keystroke joins the async generation
+    // chain (latest wins, stale diffs discarded) instead of clobbering it.
+    private var asyncUpdateInflight = 0
+
+    private fun pushAsync(items: List<StreamItem>, listener: OnAsyncUpdateListener?) {
+        val snapshot = ArrayList(items)
+        asyncUpdateInflight++
+        try {
+            groupAdapter.updateAsync(snapshot, false) {
+                asyncUpdateInflight--
+                try {
+                    listener?.onUpdateComplete()
+                } catch (e: Exception) {
+                    Log.e(TAG, "async update listener failed", e)
+                }
+            }
+        } catch (e: Exception) {
+            asyncUpdateInflight--
+            Log.e(TAG, "pushAsync failed", e)
+        }
+    }
+
+    private fun pushSyncOrAsync(items: List<StreamItem>) {
+        if (asyncUpdateInflight > 0) {
+            pushAsync(items, null)
+        } else {
+            try {
+                groupAdapter.update(ArrayList(items))
+            } catch (e: Exception) {
+                pushAsync(items, null)
+            }
+        }
+    }
 
     private val textWatcher = object : TextWatcher {
         override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
@@ -698,12 +736,13 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
         }
         rebuildFilteredList(text.ifEmpty { null })
 
-        // Use synchronous update to avoid race conditions during rapid filtering
+        // Use synchronous update to avoid race conditions during rapid filtering.
+        // Joins the async chain while a refresh diff is in flight (see pushSyncOrAsync).
         try {
-            groupAdapter.update(if (isFilterEnabled) filteredItems else originalItems)
+            pushSyncOrAsync(if (isFilterEnabled) filteredItems else originalItems)
         } catch (e: Exception) {
             // Fallback to async if needed
-            groupAdapter.updateAsync(if (isFilterEnabled) filteredItems else originalItems, null)
+            pushAsync(if (isFilterEnabled) filteredItems else originalItems, null)
         }
 
         // Always scroll to top when filter changes
@@ -725,10 +764,10 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
         // Cancel any ongoing diff operations before starting a new one
         try {
             // Update synchronously to avoid race conditions
-            groupAdapter.update(originalItems)
+            pushSyncOrAsync(originalItems)
         } catch (e: Exception) {
             // Fallback to async with proper synchronization
-            groupAdapter.updateAsync(originalItems, null)
+            pushAsync(originalItems, null)
         }
         // Always scroll to top when clearing filter
         feedBinding.itemsList.post {
@@ -869,7 +908,7 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
             }
             rebuildFilteredList(query)
             val shown = if (isFilterEnabled) filteredItems else originalItems
-            groupAdapter.updateAsync(shown, false, null)
+            pushAsync(shown, null)
             listState?.run {
                 try {
                     feedBinding.itemsList.layoutManager?.onRestoreInstanceState(listState)
@@ -1071,16 +1110,16 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
 
         if (filteredEmpty) {
             // Filtered-empty: visible empty list, hidden playlist, no celebration.
-            groupAdapter.updateAsync(shownItems, false, null)
+            pushAsync(shownItems, null)
         } else {
-            groupAdapter.updateAsync(shownItems, false) {
-                if (!celebrate) return@updateAsync
+            pushAsync(shownItems) {
+                if (!celebrate) return@pushAsync
                 val stillCurrent = try {
                     viewModel.filterGeneration == applyGen
                 } catch (e: Exception) {
                     true
                 }
-                if (!stillCurrent) return@updateAsync
+                if (!stillCurrent) return@pushAsync
                 oldOldestSubscriptionUpdate?.run {
                     highlightNewItemsAfter(oldOldestSubscriptionUpdate)
                 }
