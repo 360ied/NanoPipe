@@ -65,6 +65,10 @@ Always use the Gradle wrapper (`./gradlew`); never a system `gradle`.
 
 ## Verification
 
+- **No CI (by design)**: this repository has no CI. No GitHub Actions or
+other automation runs these gates; enforcement is manual — running
+`./scripts/check.sh` before completing a code task is the gate.
+
 - **Pre-Completion Check**: Run `./scripts/check.sh` inside the dedicated worktree before completing any code task. Passing verification signifies that the branch is ready for user review — it does NOT trigger or authorize merging into `main`. Standalone documentation-only changes (committed on `main`) are exempt from `./scripts/check.sh`.
 - **Fast Gate** (default): Python unit tests for `scripts/` plus `assembleDebug` + `lintDebug` (`-DskipFormatKtlint`) in `PipePipeClient/`:
   `nix develop --command ./gradlew assembleDebug lintDebug --stacktrace -DskipFormatKtlint` (run from `PipePipeClient/` inside the worktree).
