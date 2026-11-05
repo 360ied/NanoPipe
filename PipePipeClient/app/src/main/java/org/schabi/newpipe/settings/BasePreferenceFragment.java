@@ -1,6 +1,7 @@
 package org.schabi.newpipe.settings;
 
 import android.content.SharedPreferences;
+import android.content.res.Resources;
 import android.os.Bundle;
 import android.view.View;
 
@@ -50,7 +51,14 @@ public abstract class BasePreferenceFragment extends PreferenceFragmentCompat {
     @NonNull
     public final Preference requirePreference(@StringRes final int resId) {
         final Preference preference = findPreference(getString(resId));
+        String keyName;
+        try {
+            keyName = getResources().getResourceEntryName(resId);
+        } catch (final Resources.NotFoundException e) {
+            keyName = "resId=" + resId;
+        }
+        final String missingKey = keyName;
         return Objects.requireNonNull(preference,
-                () -> "Missing preference for key resId=" + resId);
+                () -> "Missing preference for key " + missingKey);
     }
 }

@@ -56,10 +56,16 @@ public class VideoAudioSettingsFragment extends BasePreferenceFragment {
         addPreferencesFromResourceRegistry();
 
         listener = (sharedPreferences, s) -> {
+            if (s == null) {
+                return;
+            }
             if (s.equals(getString(R.string.caption_language_filter_key))) {
                 final Preference changed = findPreference(s);
                 if (changed instanceof MultiSelectListPreference) {
-                    updateCaptionLanguageFilterSummary((MultiSelectListPreference) changed);
+                    final MultiSelectListPreference filterPreference =
+                            (MultiSelectListPreference) changed;
+                    normalizePersistedCaptionLanguages(filterPreference);
+                    updateCaptionLanguageFilterSummary(filterPreference);
                 }
             }
             if (s.equals(getString(R.string.minimize_on_exit_key))) {
@@ -118,14 +124,25 @@ public class VideoAudioSettingsFragment extends BasePreferenceFragment {
         }
         filterPreference.setEntries(entries);
         filterPreference.setEntryValues(entryValues);
-        // Drop codes that no longer match the vocabulary (e.g. restored from
-        // a backup) so the dialog checkboxes reflect the effective filter.
-        final Set<String> normalizedStored =
-                CaptionLanguageFilter.normalizeSelection(filterPreference.getValues());
-        if (!normalizedStored.equals(filterPreference.getValues())) {
-            filterPreference.setValues(normalizedStored);
-        }
+        normalizePersistedCaptionLanguages(filterPreference);
         updateCaptionLanguageFilterSummary(filterPreference);
+    }
+
+    /**
+     * Canonicalize the stored set (e.g. restored from a backup) so dialog
+     * checkboxes and the summary reflect the effective filter. Unknown codes
+     * are kept: the summary falls back to uppercase and they clear on the
+     * next dialog confirm. Playback normalizes independently, so this only
+     * affects settings display.
+     */
+    private void normalizePersistedCaptionLanguages(
+            final MultiSelectListPreference filterPreference) {
+        final Set<String> stored = filterPreference.getValues();
+        final Set<String> normalized =
+                CaptionLanguageFilter.normalizeSelection(stored);
+        if (!normalized.equals(stored)) {
+            filterPreference.setValues(normalized);
+        }
     }
 
     private void updateCaptionLanguageFilterSummary(
@@ -254,7 +271,10 @@ public class VideoAudioSettingsFragment extends BasePreferenceFragment {
         final Preference preference =
                 findPreference(getString(R.string.caption_language_filter_key));
         if (preference instanceof MultiSelectListPreference) {
-            updateCaptionLanguageFilterSummary((MultiSelectListPreference) preference);
+            final MultiSelectListPreference filterPreference =
+                    (MultiSelectListPreference) preference;
+            normalizePersistedCaptionLanguages(filterPreference);
+            updateCaptionLanguageFilterSummary(filterPreference);
         }
     }
 

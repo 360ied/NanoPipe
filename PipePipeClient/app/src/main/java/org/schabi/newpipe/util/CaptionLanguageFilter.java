@@ -114,9 +114,15 @@ public final class CaptionLanguageFilter {
     /**
      * Check a single language tag against an already-normalized selection.
      * An empty selection allows everything.
+     *
+     * @param normalizedSelection selection previously passed through
+     *                              {@link #normalizeSelection}; raw stored sets
+     *                              must be normalized first or non-canonical
+     *                              codes will never match
      */
     public static boolean isTagAllowed(@NonNull final Set<String> normalizedSelection,
                                       @Nullable final String tag) {
+        Objects.requireNonNull(normalizedSelection);
         if (normalizedSelection.isEmpty()) {
             return true;
         }
@@ -141,7 +147,11 @@ public final class CaptionLanguageFilter {
         }
         final Set<String> normalized = normalizeSelection(selected);
         if (normalized.isEmpty()) {
-            result.addAll(subtitles);
+            for (final SubtitlesStream stream : subtitles) {
+                if (stream != null) {
+                    result.add(stream);
+                }
+            }
             return result;
         }
         for (final SubtitlesStream stream : subtitles) {
@@ -201,21 +211,20 @@ public final class CaptionLanguageFilter {
     public static List<LanguageEntry> buildVocabulary(
             @NonNull final Locale displayLocale,
             @Nullable final Collection<Locale> availableLocales) {
+        Objects.requireNonNull(displayLocale);
         // Keyed by code so aliases that canonicalize to the same value
         // (e.g. iw/he) collapse into a single entry.
         final Map<String, String> codeToName = new TreeMap<>();
         if (availableLocales != null) {
             for (final Locale locale : availableLocales) {
                 final String code = canonicalPrimaryCode(primaryCodeOf(locale));
-                if (isVocabularyCode(code) && !codeToName.containsKey(code)) {
-                    codeToName.put(code, displayNameFor(code, displayLocale));
+                if (isVocabularyCode(code)) {
+                    codeToName.putIfAbsent(code, displayNameFor(code, displayLocale));
                 }
             }
         }
         for (final String extra : EXTRA_CODES) {
-            if (!codeToName.containsKey(extra)) {
-                codeToName.put(extra, displayNameFor(extra, displayLocale));
-            }
+            codeToName.putIfAbsent(extra, displayNameFor(extra, displayLocale));
         }
         final List<LanguageEntry> entries = new ArrayList<>(codeToName.size());
         for (final Map.Entry<String, String> entry : codeToName.entrySet()) {
@@ -236,6 +245,7 @@ public final class CaptionLanguageFilter {
     @NonNull
     public static String displayNameFor(@NonNull final String code,
                                        @NonNull final Locale displayLocale) {
+        Objects.requireNonNull(code);
         final String name = new Locale(code).getDisplayLanguage(displayLocale);
         if (name == null || name.isEmpty() || name.equals(code)) {
             return code.toUpperCase(Locale.ROOT);
@@ -252,6 +262,8 @@ public final class CaptionLanguageFilter {
             @Nullable final Set<String> normalizedSelected,
             @NonNull final Map<String, String> codeToName,
             @NonNull final Collator collator) {
+        Objects.requireNonNull(codeToName);
+        Objects.requireNonNull(collator);
         final List<String> names = new ArrayList<>();
         if (normalizedSelected == null) {
             return names;
@@ -270,10 +282,11 @@ public final class CaptionLanguageFilter {
     @NonNull
     public static Map<String, String> nameMap(
             @NonNull final List<LanguageEntry> vocabulary) {
+        Objects.requireNonNull(vocabulary);
         final Map<String, String> map = new HashMap<>(vocabulary.size() + 1);
         for (final LanguageEntry entry : vocabulary) {
             map.put(entry.code, entry.name);
         }
-        return map;
+        return Collections.unmodifiableMap(map);
     }
 }

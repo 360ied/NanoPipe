@@ -1,6 +1,7 @@
 package org.schabi.newpipe.util;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotSame;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
@@ -62,6 +63,12 @@ public class CaptionLanguageFilterTest {
         assertEquals("he", CaptionLanguageFilter.canonicalPrimaryCode("iw-IL"));
         assertEquals("id", CaptionLanguageFilter.canonicalPrimaryCode("in-ID"));
         assertEquals("", CaptionLanguageFilter.canonicalPrimaryCode("und"));
+        assertEquals("", CaptionLanguageFilter.canonicalPrimaryCode("UND"));
+        assertEquals("", CaptionLanguageFilter.canonicalPrimaryCode(" und "));
+        assertEquals("", CaptionLanguageFilter.canonicalPrimaryCode("und-US"));
+        assertEquals("he", CaptionLanguageFilter.canonicalPrimaryCode("IW"));
+        assertEquals("id", CaptionLanguageFilter.canonicalPrimaryCode("IN"));
+        assertEquals("yi", CaptionLanguageFilter.canonicalPrimaryCode("JI"));
         assertEquals("id", CaptionLanguageFilter.canonicalPrimaryCode("in"));
         assertEquals("id", CaptionLanguageFilter.canonicalPrimaryCode("id"));
         assertEquals("yi", CaptionLanguageFilter.canonicalPrimaryCode("ji"));
@@ -84,10 +91,10 @@ public class CaptionLanguageFilterTest {
                 CaptionLanguageFilter.normalizeSelection(null), "und"));
         final Set<String> selected = set("en");
         assertTrue(CaptionLanguageFilter.isTagAllowed(selected, "en-US"));
-        assertTrue(!CaptionLanguageFilter.isTagAllowed(selected, "de"));
-        assertTrue(!CaptionLanguageFilter.isTagAllowed(selected, null));
-        assertTrue(!CaptionLanguageFilter.isTagAllowed(selected, "und"));
-        assertTrue(!CaptionLanguageFilter.isTagAllowed(selected, ""));
+        assertFalse(CaptionLanguageFilter.isTagAllowed(selected, "de"));
+        assertFalse(CaptionLanguageFilter.isTagAllowed(selected, null));
+        assertFalse(CaptionLanguageFilter.isTagAllowed(selected, "und"));
+        assertFalse(CaptionLanguageFilter.isTagAllowed(selected, ""));
     }
 
     @Test
@@ -95,6 +102,8 @@ public class CaptionLanguageFilterTest {
         assertEquals("", CaptionLanguageFilter.primaryCodeOf(null));
         assertEquals("", CaptionLanguageFilter.primaryCodeOf(new Locale("und")));
         assertEquals("en", CaptionLanguageFilter.primaryCodeOf(Locale.ENGLISH));
+        assertEquals("he", CaptionLanguageFilter.primaryCodeOf(new Locale("iw")));
+        assertEquals("en", CaptionLanguageFilter.primaryCodeOf(new Locale("en", "US")));
     }
 
     @Test
@@ -110,6 +119,31 @@ public class CaptionLanguageFilterTest {
         assertTrue(CaptionLanguageFilter.sortedDisplayNames(null,
                 Collections.emptyMap(),
                 Collator.getInstance(Locale.ENGLISH)).isEmpty());
+    }
+
+    @Test
+    public void displayNameFallbackIgnoresDefaultLocale() {
+        final Locale previousDefault = Locale.getDefault();
+        Locale.setDefault(new Locale("tr"));
+        try {
+            // "xi" has no display name; Turkish uppercasing of "xi" would be
+            // "Xİ", so this pins the Locale.ROOT fallback ("XI").
+            assertEquals("XI",
+                    CaptionLanguageFilter.displayNameFor("xi", Locale.ENGLISH));
+        } finally {
+            Locale.setDefault(previousDefault);
+        }
+    }
+
+    @Test
+    public void allowAllPathSkipsNullElements() {
+        final List<SubtitlesStream> source =
+                new ArrayList<>(Arrays.asList(stream("en"), null));
+        assertEquals(Collections.singletonList("en"),
+                tags(CaptionLanguageFilter.filterSubtitles(null, source)));
+        assertEquals(Collections.singletonList("en"),
+                tags(CaptionLanguageFilter.filterSubtitles(
+                        set("en"), Arrays.asList(null, stream("en")))));
     }
 
     @Test
@@ -209,7 +243,7 @@ public class CaptionLanguageFilterTest {
         assertTrue(codes.contains("yue"));
         assertTrue(codes.contains("ceb"));
         assertTrue(codes.contains("haw"));
-        assertTrue(!codes.contains("und"));
+        assertFalse(codes.contains("und"));
         // Every code is a canonical two- or three-letter primary.
         for (final String code : codes) {
             assertEquals(code, CaptionLanguageFilter.canonicalPrimaryCode(code));
