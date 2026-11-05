@@ -41,13 +41,13 @@ public class VideoAudioSettingsFragment extends BasePreferenceFragment {
     private static final int IDX_AV1 = 1;
 
     /** Dialog tag for the caption-language checklist; guards double-show. */
-    private static final String CAPTION_LANGUAGE_DIALOG_TAG = "caption_language_filter";
+    private static final String CAPTION_LANGUAGE_DIALOG_TAG = "caption_language_filter_dialog";
 
     /** Maximum selected languages listed by name before the summary collapses to a count. */
     private static final int MAX_NAMES_IN_SUMMARY = 3;
 
-    private List<LanguageEntry> captionLanguageVocabulary;
     private Map<String, String> captionLanguageCodeToName;
+    private Locale captionLanguageCacheLocale;
 
     private SharedPreferences.OnSharedPreferenceChangeListener listener;
     private final CompositeDisposable disposables = new CompositeDisposable();
@@ -105,13 +105,19 @@ public class VideoAudioSettingsFragment extends BasePreferenceFragment {
     }
 
     private void buildCaptionLanguageMaps() {
-        // Rebuilt (not cached across resumes) so an in-app locale change
-        // cannot leave dialog and summary names disagreeing.
-        captionLanguageVocabulary = CaptionLanguageFilter.buildVocabulary(
-                Locale.getDefault(),
+        // Cached per display locale so every onResume() does not re-collate ~200
+        // locales; an in-app locale change still rebuilds so dialog and summary agree.
+        final Locale displayLocale = Locale.getDefault();
+        if (captionLanguageCodeToName != null
+                && displayLocale.equals(captionLanguageCacheLocale)) {
+            return;
+        }
+        final List<LanguageEntry> vocabulary = CaptionLanguageFilter.buildVocabulary(
+                displayLocale,
                 Arrays.asList(Locale.getAvailableLocales()));
         captionLanguageCodeToName =
-                CaptionLanguageFilter.nameMap(captionLanguageVocabulary);
+                CaptionLanguageFilter.nameMap(vocabulary);
+        captionLanguageCacheLocale = displayLocale;
     }
 
     /**
@@ -134,8 +140,7 @@ public class VideoAudioSettingsFragment extends BasePreferenceFragment {
     }
 
     private void updateCaptionLanguageFilterSummary() {
-        if (!isAdded() || captionLanguageVocabulary == null
-                || captionLanguageCodeToName == null) {
+        if (!isAdded() || captionLanguageCodeToName == null) {
             return;
         }
         final Preference preference =
@@ -259,6 +264,7 @@ public class VideoAudioSettingsFragment extends BasePreferenceFragment {
             } catch (final ActivityNotFoundException e) {
                 Toast.makeText(getActivity(), R.string.general_error, Toast.LENGTH_SHORT).show();
             }
+            return true;
         }
 
         return super.onPreferenceTreeClick(preference);

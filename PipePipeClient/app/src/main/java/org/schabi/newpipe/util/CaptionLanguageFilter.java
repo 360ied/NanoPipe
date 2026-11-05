@@ -16,7 +16,6 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
-import java.util.TreeMap;
 
 /**
  * Primary-language matching for the caption-language allowlist.
@@ -31,7 +30,7 @@ public final class CaptionLanguageFilter {
      * Codes that must exist in the checklist even if the platform does not
      * report a locale for them.
      */
-    private static final String[] EXTRA_CODES = {"yue", "ceb", "haw"};
+    private static final List<String> EXTRA_CODES = List.of("yue", "ceb", "haw");
 
     private CaptionLanguageFilter() {
     }
@@ -49,6 +48,28 @@ public final class CaptionLanguageFilter {
             this.code = Objects.requireNonNull(code);
             this.name = Objects.requireNonNull(name);
         }
+
+        @Override
+        public boolean equals(final Object other) {
+            if (this == other) {
+                return true;
+            }
+            if (!(other instanceof LanguageEntry)) {
+                return false;
+            }
+            final LanguageEntry that = (LanguageEntry) other;
+            return code.equals(that.code) && name.equals(that.name);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(code, name);
+        }
+
+        @Override
+        public String toString() {
+            return "LanguageEntry{code='" + code + "', name='" + name + "'}";
+        }
     }
 
     /**
@@ -59,8 +80,10 @@ public final class CaptionLanguageFilter {
      * {@code ji} (mapped to {@code he}/{@code id}/{@code yi}, matching their
      * modern equivalents). The undetermined tag {@code und} maps to empty
      * because it names no language and can never be selected.
-     * Returns an empty string for null, blank, or
-     * unparseable tags.</p>
+     * Returns an empty string for null, blank, undetermined, or
+     * empty-primary tags. Other primaries (including numeric strings such as
+     * {@code "123"}) are returned lowercased; the vocabulary filter and
+     * selection normalization exclude values that name no selectable language.</p>
      */
     @NonNull
     public static String canonicalPrimaryCode(@Nullable final String tag) {
@@ -123,11 +146,14 @@ public final class CaptionLanguageFilter {
     public static boolean isTagAllowed(@NonNull final Set<String> normalizedSelection,
                                       @Nullable final String tag) {
         Objects.requireNonNull(normalizedSelection);
-        if (normalizedSelection.isEmpty()) {
+        // Defensively re-normalize: already-canonical sets pass through unchanged,
+        // while raw sets (e.g. "EN-US", "und") converge to the effective filter.
+        final Set<String> effective = normalizeSelection(normalizedSelection);
+        if (effective.isEmpty()) {
             return true;
         }
         final String primary = canonicalPrimaryCode(tag);
-        return !primary.isEmpty() && normalizedSelection.contains(primary);
+        return !primary.isEmpty() && effective.contains(primary);
     }
 
     /**
@@ -214,17 +240,17 @@ public final class CaptionLanguageFilter {
         Objects.requireNonNull(displayLocale);
         // Keyed by code so aliases that canonicalize to the same value
         // (e.g. iw/he) collapse into a single entry.
-        final Map<String, String> codeToName = new TreeMap<>();
+        final Map<String, String> codeToName = new HashMap<>();
         if (availableLocales != null) {
             for (final Locale locale : availableLocales) {
                 final String code = canonicalPrimaryCode(primaryCodeOf(locale));
                 if (isVocabularyCode(code)) {
-                    codeToName.putIfAbsent(code, displayNameFor(code, displayLocale));
+                    codeToName.computeIfAbsent(code, k -> displayNameFor(k, displayLocale));
                 }
             }
         }
         for (final String extra : EXTRA_CODES) {
-            codeToName.putIfAbsent(extra, displayNameFor(extra, displayLocale));
+            codeToName.computeIfAbsent(extra, k -> displayNameFor(k, displayLocale));
         }
         final List<LanguageEntry> entries = new ArrayList<>(codeToName.size());
         for (final Map.Entry<String, String> entry : codeToName.entrySet()) {
@@ -270,6 +296,9 @@ public final class CaptionLanguageFilter {
             return names;
         }
         for (final String code : normalizedSelected) {
+            if (code == null) {
+                continue;
+            }
             final String name = codeToName.get(code);
             names.add(name != null ? name : code.toUpperCase(Locale.ROOT));
         }
@@ -321,14 +350,16 @@ public final class CaptionLanguageFilter {
             @NonNull final List<LanguageEntry> entries,
             @Nullable final Set<String> normalizedSelected) {
         Objects.requireNonNull(entries);
+        // Defensively re-normalize: already-canonical sets pass through unchanged.
+        final Set<String> effective = normalizedSelected == null
+                ? null : normalizeSelection(normalizedSelected);
         final List<LanguageEntry> result = new ArrayList<>(entries.size());
         final List<LanguageEntry> rest = new ArrayList<>(entries.size());
         for (final LanguageEntry entry : entries) {
             if (entry == null) {
                 continue;
             }
-            if (normalizedSelected != null
-                    && normalizedSelected.contains(entry.code)) {
+            if (effective != null && effective.contains(entry.code)) {
                 result.add(entry);
             } else {
                 rest.add(entry);

@@ -2,11 +2,13 @@ package org.schabi.newpipe.settings;
 
 import android.app.Dialog;
 import android.os.Bundle;
+import android.os.Parcelable;
 import android.text.Editable;
 import android.text.TextWatcher;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.inputmethod.EditorInfo;
 import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.EditText;
@@ -45,14 +47,19 @@ public class CaptionLanguageSelectionDialog extends DialogFragment {
     private List<LanguageEntry> vocabulary = new ArrayList<>();
     private final Set<String> workingSet = new HashSet<>();
     private LanguageSelectionAdapter adapter;
+    private EditText searchField;
+    private RecyclerView languageList;
 
     @NonNull
     @Override
-    @SuppressWarnings("deprecation")
     public Dialog onCreateDialog(@Nullable final Bundle savedInstanceState) {
         final View view = getLayoutInflater()
                 .inflate(R.layout.dialog_caption_language_selection, null);
+        searchField = view.findViewById(R.id.caption_language_search);
+        languageList = view.findViewById(R.id.caption_language_recycler_view);
 
+        // ~200 locales + Collator sort; fast enough for dialog open on modern devices
+        // and kept synchronous so the dialog and the settings summary agree.
         vocabulary = CaptionLanguageFilter.buildVocabulary(
                 Locale.getDefault(),
                 Arrays.asList(Locale.getAvailableLocales()));
@@ -63,6 +70,8 @@ public class CaptionLanguageSelectionDialog extends DialogFragment {
                 workingSet.addAll(restored);
             }
         } else {
+            // getDefaultSharedPreferences() resolves to the same store as
+            // VideoAudioSettingsFragment's getPreferenceManager().getSharedPreferences().
             workingSet.addAll(CaptionLanguageFilter.normalizeSelection(
                     PreferenceManager.getDefaultSharedPreferences(requireContext())
                             .getStringSet(getString(R.string.caption_language_filter_key),
@@ -73,17 +82,14 @@ public class CaptionLanguageSelectionDialog extends DialogFragment {
         setupSearch(view);
         setupButtons(view);
         if (savedInstanceState != null) {
-            final EditText searchField =
-                    view.findViewById(R.id.caption_language_search);
             searchField.setText(savedInstanceState.getString(STATE_QUERY, ""));
-            final android.os.Parcelable scrollState =
+            @SuppressWarnings("deprecation")
+            final Parcelable scrollState =
                     savedInstanceState.getParcelable(STATE_SCROLL);
             if (scrollState != null) {
-                final RecyclerView recyclerView = view.findViewById(
-                        R.id.caption_language_recycler_view);
-                recyclerView.post(() -> {
-                    if (recyclerView.getLayoutManager() != null) {
-                        recyclerView.getLayoutManager()
+                languageList.post(() -> {
+                    if (languageList.getLayoutManager() != null) {
+                        languageList.getLayoutManager()
                                 .onRestoreInstanceState(scrollState);
                     }
                 });
@@ -101,17 +107,14 @@ public class CaptionLanguageSelectionDialog extends DialogFragment {
     public void onSaveInstanceState(@NonNull final Bundle outState) {
         super.onSaveInstanceState(outState);
         outState.putStringArrayList(STATE_WORKING_SET, new ArrayList<>(workingSet));
-        final View view = getView();
-        if (view != null) {
-            final EditText searchField =
-                    view.findViewById(R.id.caption_language_search);
-            final RecyclerView recyclerView =
-                    view.findViewById(R.id.caption_language_recycler_view);
+        // getView() is always null for a DialogFragment that only overrides
+        // onCreateDialog(), so persist via the retained dialog views.
+        if (searchField != null) {
             outState.putString(STATE_QUERY, searchField.getText().toString());
-            if (recyclerView.getLayoutManager() != null) {
-                outState.putParcelable(STATE_SCROLL, recyclerView.getLayoutManager()
-                        .onSaveInstanceState());
-            }
+        }
+        if (languageList != null && languageList.getLayoutManager() != null) {
+            outState.putParcelable(STATE_SCROLL, languageList.getLayoutManager()
+                    .onSaveInstanceState());
         }
     }
 
@@ -121,11 +124,9 @@ public class CaptionLanguageSelectionDialog extends DialogFragment {
         adapter = new LanguageSelectionAdapter();
         recyclerView.setLayoutManager(new LinearLayoutManager(requireContext()));
         recyclerView.setAdapter(adapter);
-        updateEmptyState(view);
     }
 
     private void setupSearch(final View view) {
-        final EditText searchField = view.findViewById(R.id.caption_language_search);
         searchField.addTextChangedListener(new TextWatcher() {
             @Override
             public void beforeTextChanged(final CharSequence s, final int start,
@@ -137,7 +138,7 @@ public class CaptionLanguageSelectionDialog extends DialogFragment {
                                       final int before, final int count) {
                 if (adapter != null) {
                     adapter.setFilter(s == null ? null : s.toString());
-                    updateEmptyState(getView());
+                    updateEmptyState(view);
                 }
             }
 
@@ -145,12 +146,18 @@ public class CaptionLanguageSelectionDialog extends DialogFragment {
             public void afterTextChanged(final Editable s) {
             }
         });
+        searchField.setOnEditorActionListener((v, actionId, event) -> {
+            if (actionId == EditorInfo.IME_ACTION_DONE) {
+                searchField.clearFocus();
+            }
+            return false;
+        });
     }
 
     private void setupButtons(final View view) {
         final Button cancelButton = view.findViewById(R.id.cancel_button);
         final Button saveButton = view.findViewById(R.id.save_button);
-        cancelButton.setOnClickListener(v -> dismissAllowingStateLoss());
+        cancelButton.setOnClickListener(v -> dismiss());
         saveButton.setOnClickListener(v -> saveChanges());
     }
 
@@ -160,7 +167,7 @@ public class CaptionLanguageSelectionDialog extends DialogFragment {
                 .putStringSet(getString(R.string.caption_language_filter_key),
                         CaptionLanguageFilter.normalizeSelection(workingSet))
                 .apply();
-        dismissAllowingStateLoss();
+        dismiss();
     }
 
     private void updateEmptyState(@Nullable final View view) {
@@ -174,12 +181,16 @@ public class CaptionLanguageSelectionDialog extends DialogFragment {
     private class LanguageSelectionAdapter
             extends RecyclerView.Adapter<LanguageViewHolder> {
         private List<LanguageEntry> visibleEntries = rebuild(null);
+        private Set<String> visibleSelected = new HashSet<>(workingSet);
 
         void setFilter(@Nullable final String query) {
             final List<LanguageEntry> updated = rebuild(query);
+            final Set<String> updatedSelected = new HashSet<>(workingSet);
             final DiffUtil.DiffResult diff = DiffUtil.calculateDiff(
-                    new LanguageDiffCallback(visibleEntries, updated));
+                    new LanguageDiffCallback(visibleEntries, updated,
+                            visibleSelected, updatedSelected));
             visibleEntries = updated;
+            visibleSelected = updatedSelected;
             diff.dispatchUpdatesTo(this);
         }
 
@@ -224,11 +235,17 @@ public class CaptionLanguageSelectionDialog extends DialogFragment {
     private static class LanguageDiffCallback extends DiffUtil.Callback {
         private final List<LanguageEntry> oldEntries;
         private final List<LanguageEntry> newEntries;
+        private final Set<String> oldSelected;
+        private final Set<String> newSelected;
 
         LanguageDiffCallback(final List<LanguageEntry> oldEntries,
-                             final List<LanguageEntry> newEntries) {
+                             final List<LanguageEntry> newEntries,
+                             final Set<String> oldSelected,
+                             final Set<String> newSelected) {
             this.oldEntries = oldEntries;
             this.newEntries = newEntries;
+            this.oldSelected = oldSelected;
+            this.newSelected = newSelected;
         }
 
         @Override
@@ -251,8 +268,12 @@ public class CaptionLanguageSelectionDialog extends DialogFragment {
         public boolean areContentsTheSame(final int oldPosition, final int newPosition) {
             final LanguageEntry oldEntry = oldEntries.get(oldPosition);
             final LanguageEntry newEntry = newEntries.get(newPosition);
+            // Checkbox state derives from the selection, not the entry: a row that
+            // moved after a toggle must rebind even when code+name are unchanged.
             return oldEntry.code.equals(newEntry.code)
-                    && oldEntry.name.equals(newEntry.name);
+                    && oldEntry.name.equals(newEntry.name)
+                    && oldSelected.contains(oldEntry.code)
+                        == newSelected.contains(newEntry.code);
         }
     }
 
@@ -282,7 +303,6 @@ public class CaptionLanguageSelectionDialog extends DialogFragment {
 
         void bind(final LanguageEntry entry) {
             nameView.setText(entry.name);
-            checkBox.setContentDescription(entry.name);
             checkBox.setChecked(workingSet.contains(entry.code));
         }
 

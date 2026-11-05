@@ -4,9 +4,10 @@ Add a Settings-based caption-language allowlist for extracted, side-loaded
 subtitles. Users choose languages from a standard multi-choice checklist; the
 existing player caption popup then shows only allowed side-loaded tracks.
 Live and manifest-embedded captions are explicitly outside this feature's
-scope. No search field, freeform text, or keyboard input is added to ExoPlayer.
+scope. No search field, freeform text, or keyboard input is added to the player popup
+or ExoPlayer UI; keyboard interaction is confined to the Settings dialog.
 
-- Status: **proposed; not implemented**.
+- Status: **implemented; in review**.
 - Implemented in branch `feat/caption-language-filter` with one deliberate
   deviation: a searchable custom dialog replaces the specified
   `MultiSelectListPreference` (see §2). The stock multi-choice dialog rendered

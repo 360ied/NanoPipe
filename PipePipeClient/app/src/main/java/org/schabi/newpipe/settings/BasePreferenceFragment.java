@@ -18,10 +18,10 @@ import org.schabi.newpipe.util.ThemeHelper;
 import java.util.Objects;
 
 public abstract class BasePreferenceFragment extends PreferenceFragmentCompat {
-    protected final String TAG = getClass().getSimpleName() + "@" + Integer.toHexString(hashCode());
+    protected final String TAG = getClass().getSimpleName();
     protected static final boolean DEBUG = MainActivity.DEBUG;
 
-    SharedPreferences defaultPreferences;
+    protected SharedPreferences defaultPreferences;
 
     @Override
     public void onCreate(@Nullable final Bundle savedInstanceState) {
@@ -60,8 +60,7 @@ public abstract class BasePreferenceFragment extends PreferenceFragmentCompat {
                     "Missing preference for invalid resId=" + resId, e);
         }
         final Preference preference = findPreference(key);
-        final String message =
-                "Missing preference for key '" + key + "' (" + entryName + ")";
-        return Objects.requireNonNull(preference, () -> message);
+        return Objects.requireNonNull(preference,
+                () -> "Missing preference for key '" + key + "' (" + entryName + ")");
     }
 }

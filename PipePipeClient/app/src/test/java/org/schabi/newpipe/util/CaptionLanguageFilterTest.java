@@ -405,4 +405,62 @@ public class CaptionLanguageFilterTest {
         assertNotSame(stored, normalized);
         assertTrue(CaptionLanguageFilter.normalizeSelection(null).isEmpty());
     }
+
+    @Test
+    public void vocabularyHandlesNullLocalesAndNullElements() {
+        final List<LanguageEntry> nullVocabulary =
+                CaptionLanguageFilter.buildVocabulary(Locale.ENGLISH, null);
+        final Set<String> nullCodes = new HashSet<>(codesOf(nullVocabulary));
+        assertTrue(nullCodes.contains("yue"));
+        assertTrue(nullCodes.contains("ceb"));
+        assertTrue(nullCodes.contains("haw"));
+
+        final List<Locale> withNull =
+                new ArrayList<>(Arrays.asList(Locale.ENGLISH, null));
+        final List<LanguageEntry> vocabulary =
+                CaptionLanguageFilter.buildVocabulary(Locale.ENGLISH, withNull);
+        assertTrue(codesOf(vocabulary).contains("en"));
+    }
+
+    @Test
+    public void selectionHelpersTolerateRawCodes() {
+        assertTrue(CaptionLanguageFilter.isTagAllowed(set("EN-US"), "en"));
+        assertTrue(CaptionLanguageFilter.isTagAllowed(set("und"), "en"));
+        final List<LanguageEntry> entries = Arrays.asList(
+                new LanguageEntry("en", "English"),
+                new LanguageEntry("de", "German"));
+        assertEquals(Arrays.asList("en", "de"), codesOf(
+                CaptionLanguageFilter.sortSelectedFirst(entries, set("EN"))));
+    }
+
+    @Test
+    public void sortSelectedFirstAndNameMapSkipNullEntries() {
+        final List<LanguageEntry> entries = new ArrayList<>(Arrays.asList(
+                new LanguageEntry("en", "English"), null,
+                new LanguageEntry("de", "German")));
+        assertEquals(Arrays.asList("de", "en"), codesOf(
+                CaptionLanguageFilter.sortSelectedFirst(entries, set("de"))));
+        final Map<String, String> map = CaptionLanguageFilter.nameMap(entries);
+        assertEquals("English", map.get("en"));
+        assertEquals("German", map.get("de"));
+    }
+
+    @Test
+    public void sortedDisplayNamesSkipsNullCodes() {
+        final Map<String, String> codeToName = CaptionLanguageFilter.nameMap(
+                Arrays.asList(new LanguageEntry("en", "English")));
+        final Set<String> selected = new HashSet<>(Arrays.asList("en", null));
+        assertEquals(Collections.singletonList("English"),
+                CaptionLanguageFilter.sortedDisplayNames(selected, codeToName,
+                        Collator.getInstance(Locale.ENGLISH)));
+    }
+
+    @Test
+    public void languageEntryValueSemantics() {
+        assertEquals(new LanguageEntry("en", "English"),
+                new LanguageEntry("en", "English"));
+        assertEquals(new LanguageEntry("en", "English").hashCode(),
+                new LanguageEntry("en", "English").hashCode());
+        assertTrue(new LanguageEntry("en", "English").toString().contains("en"));
+    }
 }

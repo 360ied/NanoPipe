@@ -11,13 +11,17 @@
             android:id="@+id/caption_language_checkbox"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_marginEnd="12dp" />
+            android:layout_marginEnd="12dp"
+            android:focusable="false"
+            android:focusableInTouchMode="false"
+            android:importantForAccessibility="no" />
 
     <TextView
             android:id="@+id/caption_language_name"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
+            android:labelFor="@id/caption_language_checkbox"
             android:textSize="16sp"
             android:textColor="?android:attr/textColorPrimary" />
 
