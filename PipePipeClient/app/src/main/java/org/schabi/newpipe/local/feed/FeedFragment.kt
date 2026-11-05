@@ -862,13 +862,20 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
     // Handling
     // //////////////////////////////////////////////////////////////////////////
 
-    override fun showLoading() {
-        super.showLoading()
-        val hasContent = try {
-            ::groupAdapter.isInitialized && groupAdapter.itemCount > 0
+    // Rows hidden behind a no-match filter still count as content: fullscreen
+    // first-start UI only when truly nothing is loaded and no filter hides it.
+    private fun hasVisibleOrHiddenContent(): Boolean {
+        return try {
+            (::groupAdapter.isInitialized && groupAdapter.itemCount > 0) ||
+                (isFilterEnabled && originalItems.isNotEmpty())
         } catch (e: Exception) {
             false
         }
+    }
+
+    override fun showLoading() {
+        super.showLoading()
+        val hasContent = hasVisibleOrHiddenContent()
         if (!hasContent) {
             feedBinding.itemsList.animateHideRecyclerViewAllowingScrolling()
             feedBinding.refreshRootView.animate(false, 0)
@@ -924,11 +931,7 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
         super.handleError()
         stopRefreshIconSpin()
         Log.d("FeedRefresh", "spinnerClear/handleError@" + SystemClock.elapsedRealtime())
-        val hasContent = try {
-            ::groupAdapter.isInitialized && groupAdapter.itemCount > 0
-        } catch (e: Exception) {
-            false
-        }
+        val hasContent = hasVisibleOrHiddenContent()
         if (!hasContent) {
             feedBinding.itemsList.animateHideRecyclerViewAllowingScrolling()
             feedBinding.refreshRootView.animate(false, 0)
@@ -1222,7 +1225,7 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
         return if (errorState.error == null) {
             hideLoading()
             false
-        } else if (!::groupAdapter.isInitialized || groupAdapter.itemCount == 0) {
+        } else if (!hasVisibleOrHiddenContent()) {
             showError(ErrorInfo(errorState.error, UserAction.REQUESTED_FEED, "Loading feed"))
             true
         } else {
