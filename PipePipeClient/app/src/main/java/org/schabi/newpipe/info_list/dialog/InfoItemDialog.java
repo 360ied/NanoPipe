@@ -103,6 +103,10 @@ public final class InfoItemDialog {
         dialog.show();
     }
 
+    public void dismiss() {
+        dialog.dismiss();
+    }
+
     /**
      * <p>Builder to generate a {@link InfoItemDialog} for a {@link StreamInfoItem}.</p>
      * Use {@link #addEntry(StreamDialogDefaultEntry)}

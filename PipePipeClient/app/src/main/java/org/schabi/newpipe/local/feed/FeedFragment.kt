@@ -48,6 +48,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.preference.PreferenceManager
 import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.RecyclerView
+import com.google.android.material.snackbar.Snackbar
 import com.xwray.groupie.GroupieAdapter
 import com.xwray.groupie.Item
 import com.xwray.groupie.OnItemClickListener
@@ -116,6 +117,12 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
     private var updateListViewModeOnResume = false
     private var updatePullToRefreshOnResume = false
     private var isRefreshing = false
+    // Slice 1: transient failed-sticky header state (no rotation survival; promoted to VM in 3b).
+    private var failedSticky = false
+    private var notLoadedDialog: AlertDialog? = null
+    private var feedNotAvailableDialog: AlertDialog? = null
+    private var infoItemDialog: InfoItemDialog? = null
+    private var snackbar: Snackbar? = null
 
     private var lastNewItemsCount = 0
 
@@ -497,6 +504,14 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
         tryGetNewItemsLoadedButton()?.clearAnimation()
 
         selection.setListener(null)
+        notLoadedDialog?.dismiss()
+        notLoadedDialog = null
+        feedNotAvailableDialog?.dismiss()
+        feedNotAvailableDialog = null
+        infoItemDialog?.dismiss()
+        infoItemDialog = null
+        snackbar?.dismiss()
+        snackbar = null
         feedBinding.itemsList.adapter = null
         _feedBinding = null
         playlistControlBinding?.let { binding ->
@@ -715,10 +730,24 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
 
     override fun showLoading() {
         super.showLoading()
-        feedBinding.itemsList.animateHideRecyclerViewAllowingScrolling()
-        feedBinding.refreshRootView.animate(false, 0)
-        feedBinding.loadingProgressText.animate(true, 200)
-        feedBinding.swipeRefreshLayout.isRefreshing = true
+        val hasContent = try {
+            ::groupAdapter.isInitialized && groupAdapter.itemCount > 0
+        } catch (e: Exception) {
+            false
+        }
+        if (!hasContent) {
+            feedBinding.itemsList.animateHideRecyclerViewAllowingScrolling()
+            feedBinding.refreshRootView.animate(false, 0)
+            feedBinding.loadingProgressText.animate(true, 200)
+        } else {
+            // Refresh-with-content: keep list + header, hide centered indicator.
+            feedBinding.loadingProgressBar.animate(false, 0)
+            feedBinding.loadingProgressText.animate(false, 0)
+        }
+        // Setting the swipe spinner while disabled still shows it on some versions.
+        if (isPullToRefreshEnabled) {
+            feedBinding.swipeRefreshLayout.isRefreshing = true
+        }
         isRefreshing = true
     }
 
@@ -737,6 +766,7 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
         feedBinding.refreshRootView.animate(true, 200)
         feedBinding.loadingProgressText.animate(false, 0)
         feedBinding.swipeRefreshLayout.isRefreshing = false
+        isRefreshing = false
         playlistControlBinding?.root?.isVisible = false
     }
 
@@ -752,8 +782,15 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
 
     override fun handleError() {
         super.handleError()
-        feedBinding.itemsList.animateHideRecyclerViewAllowingScrolling()
-        feedBinding.refreshRootView.animate(false, 0)
+        val hasContent = try {
+            ::groupAdapter.isInitialized && groupAdapter.itemCount > 0
+        } catch (e: Exception) {
+            false
+        }
+        if (!hasContent) {
+            feedBinding.itemsList.animateHideRecyclerViewAllowingScrolling()
+            feedBinding.refreshRootView.animate(false, 0)
+        }
         feedBinding.loadingProgressText.animate(false, 0)
         feedBinding.swipeRefreshLayout.isRefreshing = false
         isRefreshing = false
@@ -785,7 +822,9 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
         val activity: Activity? = getActivity()
         if (context == null || context.resources == null || activity == null) return
 
-        InfoItemDialog.Builder(activity, context, this, item).create().show()
+        infoItemDialog?.dismiss()
+        infoItemDialog = InfoItemDialog.Builder(activity, context, this, item).create()
+        infoItemDialog?.show()
     }
 
     private val listenerStreamItem = object : OnItemClickListener, OnItemLongClickListener {
@@ -794,7 +833,7 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
                 selection.toggle(item.streamWithState.stream.uid)
                 return
             }
-            if (item is StreamItem && !isRefreshing) {
+            if (item is StreamItem) {
                 val stream = item.streamWithState.stream
 
                 if (autoBackgroundPlaying) {
@@ -816,7 +855,7 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
         }
 
         override fun onItemLongClick(item: Item<*>, view: View): Boolean {
-            if (item is StreamItem && !isRefreshing) {
+            if (item is StreamItem) {
                 showInfoItemDialog(item.streamWithState.stream.toStreamInfoItem())
                 return true
             }
@@ -826,6 +865,9 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
 
     @SuppressLint("StringFormatMatches")
     private fun handleLoadedState(loadedState: FeedState.LoadedState) {
+        // A scoped Success clears the transient failed-sticky header (slice 1: any LoadedState).
+        failedSticky = false
+        snackbar?.dismiss()
         val itemVersion = when (getItemViewMode(requireContext())) {
             ItemViewMode.GRID -> StreamItem.ItemVersion.GRID
             ItemViewMode.CARD -> StreamItem.ItemVersion.CARD
@@ -887,9 +929,37 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
         return if (errorState.error == null) {
             hideLoading()
             false
-        } else {
+        } else if (!::groupAdapter.isInitialized || groupAdapter.itemCount == 0) {
             showError(ErrorInfo(errorState.error, UserAction.REQUESTED_FEED, "Loading feed"))
             true
+        } else {
+            // Fatal-with-content: keep stale list + header, offer snackbar + header retry.
+            failedSticky = true
+            hideLoading()
+            updateRefreshViewState()
+            showFatalSnackbar(errorState.error)
+            true
+        }
+    }
+
+    private fun showFatalSnackbar(error: Throwable) {
+        if (snackbar?.isShown == true) return
+        try {
+            val root: View = _feedBinding?.itemsList ?: requireView()
+            snackbar = Snackbar.make(
+                root,
+                getString(R.string.feed_load_error),
+                Snackbar.LENGTH_LONG
+            ).setAction(getString(R.string.retry)) { reloadContent() }
+            snackbar?.show()
+        } catch (e: Exception) {
+            try {
+                ErrorUtil.showSnackbar(
+                    this,
+                    ErrorInfo(error, UserAction.REQUESTED_FEED, "Loading feed")
+                )
+            } catch (e: Exception) {
+            }
         }
     }
 
@@ -939,7 +1009,8 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
                             return@subscribe
                         }
 
-                        AlertDialog.Builder(requireContext())
+                        notLoadedDialog?.dismiss()
+                        notLoadedDialog = AlertDialog.Builder(requireContext())
                             .setTitle(
                                 getString(
                                     R.string.feed_subscription_not_loaded_count,
@@ -960,7 +1031,8 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
                                 }
                             }
                             .setNegativeButton(R.string.cancel, null)
-                            .show()
+                            .create()
+                        notLoadedDialog?.show()
                     },
                     { throwable -> Log.e(TAG, "Unable to load failed subscriptions", throwable) }
                 )
@@ -1004,7 +1076,11 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
                 message += "\n" + cause.message
             }
         }
-        builder.setMessage(message).create().show()
+        builder.setMessage(message).create().let { dialog ->
+            feedNotAvailableDialog?.dismiss()
+            feedNotAvailableDialog = dialog
+            dialog.show()
+        }
     }
 
     private fun updateRelativeTimeViews() {
@@ -1018,8 +1094,30 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
     private fun updateRefreshViewState() {
         feedBinding.refreshText.text = getString(
             R.string.feed_oldest_subscription_update,
-            oldestSubscriptionUpdate?.let { Localization.relativeTime(it) } ?: "—"
+            oldestSubscriptionUpdate?.let { Localization.relativeTime(it) } ?: "\u2014"
         )
+        if (failedSticky) {
+            feedBinding.refreshSubtitleText.isVisible = true
+            feedBinding.refreshSubtitleText.text =
+                getString(R.string.feed_refresh_failed_tap_to_retry)
+            feedBinding.refreshSubtitleText.contentDescription =
+                getString(R.string.feed_refresh_failed_tap_to_retry)
+            feedBinding.refreshRootView.contentDescription =
+                getString(R.string.feed_retry_desc)
+            feedBinding.refreshIcon.contentDescription =
+                getString(R.string.feed_retry_desc)
+            feedBinding.refreshIcon.isFocusable = false
+        } else {
+            feedBinding.refreshRootView.contentDescription = null
+            feedBinding.refreshIcon.contentDescription = null
+            feedBinding.refreshIcon.isFocusable = true
+            if (feedBinding.refreshSubtitleText.isVisible) {
+                feedBinding.refreshSubtitleText.contentDescription =
+                    feedBinding.refreshSubtitleText.text
+            } else {
+                feedBinding.refreshSubtitleText.contentDescription = null
+            }
+        }
     }
 
     /**
@@ -1140,6 +1238,25 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
     override fun doInitialLoadLogic() {}
 
     override fun reloadContent() {
+        if (_feedBinding != null) {
+            try {
+                hideErrorPanel()
+            } catch (e: Exception) {
+            }
+            failedSticky = false
+            snackbar?.dismiss()
+            isRefreshing = true
+            if (isPullToRefreshEnabled) {
+                try {
+                    feedBinding.swipeRefreshLayout.isRefreshing = true
+                } catch (e: Exception) {
+                }
+            }
+            try {
+                updateRefreshViewState()
+            } catch (e: Exception) {
+            }
+        }
         hideNewItemsLoaded(false)
 
         getActivity()?.startService(
