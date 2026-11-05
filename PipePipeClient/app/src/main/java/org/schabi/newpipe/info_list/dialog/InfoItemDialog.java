@@ -39,7 +39,7 @@ import java.util.stream.Stream;
  * This dialog is mostly used for longpress context menus.
  */
 public final class InfoItemDialog {
-    private static final String TAG = Build.class.getSimpleName();
+    private static final String TAG = InfoItemDialog.class.getSimpleName();
     /**
      * Ideally, {@link InfoItemDialog} would extend {@link AlertDialog}.
      * However, extending {@link AlertDialog} requires many additional lines

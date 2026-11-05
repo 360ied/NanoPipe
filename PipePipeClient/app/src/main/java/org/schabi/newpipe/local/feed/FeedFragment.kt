@@ -25,11 +25,11 @@ import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
-import android.os.SystemClock
 import android.graphics.Typeface
 import android.graphics.drawable.LayerDrawable
 import android.os.Bundle
 import android.os.Parcelable
+import android.os.SystemClock
 import android.text.Editable
 import android.text.TextWatcher
 import android.util.Log
@@ -1024,7 +1024,7 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
                     state.maxProgress
                 )
             state.maxProgress > 0 && state.currentProgress == -1 -> {
-                Log.w(
+                Log.d(
                     "FeedRefresh",
                     "mixed progress current=-1 max=${state.maxProgress}"
                 )
@@ -1164,10 +1164,22 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
 
     @SuppressLint("StringFormatMatches")
     private fun handleLoadedState(loadedState: FeedState.LoadedState) {
-        // Terminal render owns the spinner from here: a live timeout would post a
-        // bogus retry snackbar if the tick path ever misses it.
-        cancelTimer()
-        snackbar?.dismiss()
+        // Stale-render guard: a pre-load LoadedState replayed after rotation (or a
+        // replay under a tripped sticky) must not kill the armed timer or dismiss
+        // the failure snackbar — the terminal for the current load has not rendered
+        // yet. Generations distinguish current terminals from stale replays.
+        val keepFailureUI = try {
+            viewModel.failedSticky ||
+                viewModel.terminalGeneration < viewModel.loadGeneration
+        } catch (e: Exception) {
+            false
+        }
+        if (!keepFailureUI) {
+            // Terminal render owns the spinner from here: a live timeout would post a
+            // bogus retry snackbar if the tick path ever misses it.
+            cancelTimer()
+            snackbar?.dismiss()
+        }
         // Scoped celebration (slice 3b): only a fresh non-cancelled Success sets the
         // pending flag; DB-only recombines never do. Selection skips + freezes the count.
         val celebrate = try {
@@ -1230,7 +1242,10 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
             }
         }
         listState?.run {
-            feedBinding.itemsList.layoutManager?.onRestoreInstanceState(listState)
+            try {
+                feedBinding.itemsList.layoutManager?.onRestoreInstanceState(listState)
+            } catch (e: Exception) {
+            }
             listState = null
         }
 
@@ -1239,7 +1254,15 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
             feedBinding.refreshSubtitleText.text = getString(R.string.feed_no_filter_results)
             feedBinding.refreshSubtitleText.contentDescription =
                 getString(R.string.feed_no_filter_results)
+            // The subtitle promises a clear action — tapping exits search.
+            feedBinding.refreshSubtitleText.setOnClickListener {
+                try {
+                    destroyCustomViewInActionBar()
+                } catch (e: Exception) {
+                }
+            }
         } else {
+            feedBinding.refreshSubtitleText.setOnClickListener(null)
             val feedsNotLoaded = loadedState.notLoadedCount > 0
             feedBinding.refreshSubtitleText.isVisible = feedsNotLoaded
             if (feedsNotLoaded) {
@@ -1304,6 +1327,8 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
 
     private fun showFatalSnackbar(error: Throwable) {
         if (snackbar?.isShown == true) return
+        // UX stays generic by design; the specifics go to logcat (not the panel).
+        Log.e(TAG, "feed refresh fatal-with-content", error)
         try {
             showRetrySnackbar()
         } catch (e: Exception) {
@@ -1563,16 +1588,18 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
         } catch (e: Exception) {
             false
         }
-        if (sticky) {
+        // A resumed load (late arrival re-lit the spinner) shows live progress
+        // instead of the failure text until its terminal settles.
+        if (sticky && !isRefreshing) {
             feedBinding.refreshSubtitleText.isVisible = true
             feedBinding.refreshSubtitleText.text =
                 getString(R.string.feed_refresh_failed_tap_to_retry)
             feedBinding.refreshSubtitleText.contentDescription =
                 getString(R.string.feed_refresh_failed_tap_to_retry)
             feedBinding.refreshRootView.contentDescription =
-                getString(R.string.feed_retry_desc)
+                getString(R.string.feed_refresh_failed_tap_to_retry)
             feedBinding.refreshIcon.contentDescription =
-                getString(R.string.feed_retry_desc)
+                getString(R.string.feed_refresh_failed_tap_to_retry)
             feedBinding.refreshIcon.isFocusable = false
         } else {
             feedBinding.refreshRootView.contentDescription = null
@@ -1715,6 +1742,9 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
                 }
             } catch (e: Exception) {
             }
+            // Fresh reload re-arms error surfacing: the VM dedupes per load,
+            // the view per render — both reset together.
+            lastSurfacedErrorSet = null
         }
         if (_feedBinding != null && !duplicate) {
             try {

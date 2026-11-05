@@ -142,18 +142,25 @@ class FeedLoadManager(private val context: Context) {
 
                 Flowable.just(subscriptionEntity)
                     .delay(wait, TimeUnit.MILLISECONDS)
-                    // Prompt cancel: delay() is not interruptible, so race the wait
-                    // against a cooperative poll — a cancel during a long
-                    // service-throttle wait completes this rail immediately instead
-                    // of letting the action appear dead. Dropped rails emit nothing:
-                    // below-max progress at a cancelled terminal is expected.
-                    .takeUntil(
-                        Flowable.interval(
-                            CANCEL_POLL_INTERVAL_MS,
-                            CANCEL_POLL_INTERVAL_MS,
-                            TimeUnit.MILLISECONDS
-                        ).filter { cancelSignal.get() }
-                    )
+                    .let { delayed ->
+                        // Prompt cancel: delay() is not interruptible, so race a
+                        // non-trivial wait against a cooperative poll — a cancel during
+                        // a long service-throttle wait completes this rail immediately
+                        // instead of letting the action appear dead. Dropped rails emit
+                        // nothing: below-max progress at a cancelled terminal is expected.
+                        // Zero-wait rails skip the poller entirely (no timer cost).
+                        if (wait > 0) {
+                            delayed.takeUntil(
+                                Flowable.interval(
+                                    CANCEL_POLL_INTERVAL_MS,
+                                    CANCEL_POLL_INTERVAL_MS,
+                                    TimeUnit.MILLISECONDS
+                                ).filter { cancelSignal.get() }
+                            )
+                        } else {
+                            delayed
+                        }
+                    }
                     .map {
                         lastFetchTimePerService[serviceId] = System.currentTimeMillis()
                         it
@@ -255,7 +262,8 @@ class FeedLoadManager(private val context: Context) {
                                 throw wrapper
                             }
                         }
-                            // Wrap in Notification (no retry: a false predicate would silently drop loads).
+                            // Wrap in Notification: errors are already reified as
+                            // Notification.createOnError downstream, no retry involved.
                             .map { feedUpdateInfo ->
                                 Notification.createOnNext(feedUpdateInfo)
                             }
@@ -312,12 +320,12 @@ class FeedLoadManager(private val context: Context) {
         feedDatabaseManager.removeOrphansOrOlderStreams()
 
         // Re-sample at post time: a cancel landing during the orphan cleanup must
-        // not celebrate. Snapshot the errors: the next load's clear() must not
-        // mutate this already-posted event.
+        // not celebrate. The holder getter returns a snapshot, so the next load's
+        // clear() cannot mutate this already-posted event.
         val cancelledAtPost = wasCancelled || cancelSignal.get()
         FeedEventManager.postEvent(
             FeedEventManager.Event.SuccessResultEvent(
-                feedResultsHolder.itemsErrors.toList(),
+                feedResultsHolder.itemsErrors,
                 groupId,
                 cancelledAtPost
             )

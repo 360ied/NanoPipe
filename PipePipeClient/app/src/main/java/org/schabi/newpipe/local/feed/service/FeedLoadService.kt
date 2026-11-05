@@ -204,8 +204,12 @@ class FeedLoadService : Service() {
         } else {
             val progressText = state.currentProgress.toString() + "/" + state.maxProgress
 
+            // Single set like the indeterminate branch: an empty description clears
+            // stale text instead of keeping the previous channel beside fresh numbers.
             if (state.updateDescription.isNotEmpty()) {
                 notificationBuilder.setContentText("${state.updateDescription}  ($progressText)")
+            } else {
+                notificationBuilder.setContentText(progressText)
             }
         }
 
