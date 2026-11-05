@@ -47,7 +47,8 @@ object FeedEventManager {
 
         data class SuccessResultEvent(
             val itemsErrors: List<Throwable> = emptyList(),
-            override val groupId: Long = FeedGroupEntity.GROUP_ALL_ID
+            override val groupId: Long = FeedGroupEntity.GROUP_ALL_ID,
+            val cancelled: Boolean = false
         ) : Event()
 
         data class ErrorResultEvent(

@@ -598,6 +598,7 @@
 <string name="feed_retry_desc">Refresh failed — tap to retry</string>
 <string name="feed_refreshing_progress">Refreshing %1$d/%2$d</string>
 <string name="feed_refreshing_with_not_loaded">%1$s · %2$s</string>
+<string name="feed_no_filter_results">No matches — clear search</string>
 <string name="feed_notification_loading">Loading feed…</string>
 <string name="feed_processing_message">Processing feed…</string>
 <string name="feed_new_items">New feed items</string>

@@ -1,6 +1,8 @@
 package org.schabi.newpipe.local.feed
 
 import android.content.Context
+import android.os.SystemClock
+import android.util.Log
 import androidx.core.content.edit
 import androidx.lifecycle.LiveData
 import androidx.lifecycle.MutableLiveData
@@ -26,6 +28,7 @@ import org.schabi.newpipe.local.feed.service.FeedEventManager.Event.IdleEvent
 import org.schabi.newpipe.local.feed.service.FeedEventManager.Event.ProgressEvent
 import org.schabi.newpipe.local.feed.service.FeedEventManager.Event.SuccessResultEvent
 import org.schabi.newpipe.local.feed.service.FeedLoadManager
+import org.schabi.newpipe.local.feed.service.FeedLoadService
 import org.schabi.newpipe.util.DEFAULT_THROTTLE_TIMEOUT
 import java.time.OffsetDateTime
 import java.util.concurrent.TimeUnit
@@ -48,7 +51,41 @@ class FeedViewModel(
     private val mutableStateLiveData = MutableLiveData<FeedState>()
     val stateLiveData: LiveData<FeedState> = mutableStateLiveData
 
+    @Volatile
     private var seenNonProcessingProgress = false
+
+    // Slice 3b rotation/timer state (fragment-scoped VM survives rotation; fragment fields reset).
+    @Volatile
+    var refreshRequestedAt: Long? = null
+        private set
+    @Volatile
+    var lastProgressAt: Long? = null
+        private set
+    @Volatile
+    var latestScopedEvent: Event? = null
+        private set
+    @Volatile
+    var failedSticky: Boolean = false
+        private set
+    @Volatile
+    private var lastErrorSet: Set<String> = emptySet()
+
+    // Slice 3b scoped celebration: set only by a fresh non-cancelled Success render;
+    // consumed once by the fragment. DB-only recombines (Idle branch) never set it.
+    @Volatile
+    private var pendingCelebration = false
+
+    fun consumeCelebration(): Boolean {
+        val pending = pendingCelebration
+        pendingCelebration = false
+        return pending
+    }
+
+    // Slice 3b query persistence: source of truth across rotation (written per keystroke).
+    @Volatile
+    var savedQuery: String? = null
+    @Volatile
+    var filterGeneration: Long = 0
 
     // Slice 3a push channel: timer-stamp tap emits here pre-throttle for every passing
     // Progress/Success/Error (Idle explicitly exempt). Fragment collection lands in slice 4.
@@ -67,9 +104,27 @@ class FeedViewModel(
             (groupId == FeedGroupEntity.GROUP_ALL_ID &&
                 event.groupId != FeedLoadManager.GROUP_NOTIFICATION_ENABLED)
 
-    fun onReloadRequested() {
+    fun onReloadRequested(now: Long = SystemClock.elapsedRealtime()) {
+        refreshRequestedAt = now
         seenNonProcessingProgress = false
+        failedSticky = false
     }
+
+    fun onScopedEvent(event: Event, now: Long = SystemClock.elapsedRealtime()) {
+        if (event is IdleEvent) return
+        latestScopedEvent = event
+        if (event is ProgressEvent) lastProgressAt = now
+        if (event is ErrorResultEvent) failedSticky = true
+        if (event is SuccessResultEvent && !event.cancelled) failedSticky = false
+    }
+
+    private fun errorSetKey(errors: List<Throwable>): Set<String> = errors.map { e ->
+        if (e is FeedLoadService.RequestException) {
+            "${e.subscriptionId}|${e.cause?.let { it::class.qualifiedName } ?: "null"}"
+        } else {
+            "raw|${e::class.qualifiedName}"
+        }
+    }.toSet()
 
     private var combineDisposable = Flowable
         .combineLatest(
@@ -80,8 +135,16 @@ class FeedViewModel(
                     if (e !is IdleEvent) _timerTicks.tryEmit(e)
                 },
             toggleShowPlayedItemsFlowable,
-            feedDatabaseManager.notLoadedCount(groupId),
-            feedDatabaseManager.oldestSubscriptionUpdate(groupId),
+            feedDatabaseManager.notLoadedCount(groupId)
+                .onErrorResumeNext { e: Throwable ->
+                    Log.e(TAG, "notLoadedCount stream died, parking tab", e)
+                    Flowable.never()
+                },
+            feedDatabaseManager.oldestSubscriptionUpdate(groupId)
+                .onErrorResumeNext { e: Throwable ->
+                    Log.e(TAG, "oldestSubscriptionUpdate stream died, parking tab", e)
+                    Flowable.never()
+                },
 
             Function4 { t1: FeedEventManager.Event, t2: Boolean,
                 t3: Long, t4: List<OffsetDateTime> ->
@@ -92,6 +155,7 @@ class FeedViewModel(
         .subscribeOn(ioScheduler)
         .observeOn(ioScheduler)
         .map { (event, showPlayedItems, notLoadedCount, oldestUpdate) ->
+            onScopedEvent(event)
             val effectiveEvent = if ((event is SuccessResultEvent || event is ErrorResultEvent) &&
                 event == consumedTerminal
             ) {
@@ -99,17 +163,32 @@ class FeedViewModel(
             } else {
                 event
             }
-            val streamItems = if (effectiveEvent is SuccessResultEvent || effectiveEvent is IdleEvent || effectiveEvent is ProgressEvent)
-                feedDatabaseManager
-                    .getStreams(groupId, showPlayedItems)
-                    .blockingGet(arrayListOf())
-            else
-                arrayListOf()
+            // Stream-death guard: a throwing DB query emits ErrorState as a value;
+            // the subscription survives and the next recombine or reload recovers.
+            val (streamItems, queryError) = try {
+                Pair(
+                    if (effectiveEvent is SuccessResultEvent || effectiveEvent is IdleEvent || effectiveEvent is ProgressEvent)
+                        feedDatabaseManager
+                            .getStreams(groupId, showPlayedItems)
+                            .blockingGet(arrayListOf())
+                    else
+                        arrayListOf(),
+                    null
+                )
+            } catch (e: Exception) {
+                Log.e(TAG, "getStreams threw, freezing tab", e)
+                Pair(arrayListOf(), e)
+            }
 
-            CombineResultDataHolder(effectiveEvent, streamItems, notLoadedCount, oldestUpdate)
+            CombineResultDataHolder(effectiveEvent, streamItems, notLoadedCount, oldestUpdate, queryError)
         }
         .observeOn(mainScheduler)
-        .subscribe { (event, listFromDB, notLoadedCount, oldestUpdate) ->
+        .subscribe { holder ->
+            val (event, listFromDB, notLoadedCount, oldestUpdate, queryError) = holder
+            if (queryError != null) {
+                mutableStateLiveData.postValue(FeedState.ErrorState(queryError))
+                return@subscribe
+            }
             when (event) {
                 is ProgressEvent -> {
                     if (event.maxProgress > 0 || event.currentProgress >= 0) {
@@ -155,12 +234,19 @@ class FeedViewModel(
                     // Fresh DB query already resolved above; no-op gate holds here when only
                     // processing-only progress was seen — still emit fresh LoadedState silently.
                     consumedTerminal = event
+                    // Error-set gate (slice 3b): same set consecutively → no re-fire;
+                    // error-free Success clears the set.
+                    val errorSet = errorSetKey(event.itemsErrors)
+                    val errorsToReport =
+                        if (errorSet == lastErrorSet) emptyList() else event.itemsErrors
+                    lastErrorSet = errorSet
+                    if (!event.cancelled) pendingCelebration = true
                     mutableStateLiveData.postValue(
                         FeedState.LoadedState(
                             listFromDB.map { e -> StreamItem(e) },
                             oldestUpdate,
                             notLoadedCount,
-                            event.itemsErrors
+                            errorsToReport
                         )
                     )
                     seenNonProcessingProgress = false
@@ -189,7 +275,8 @@ class FeedViewModel(
         val t1: FeedEventManager.Event,
         val t2: List<StreamWithState>,
         val t3: Long,
-        val t4: OffsetDateTime?
+        val t4: OffsetDateTime?,
+        val t5: Throwable? = null
     )
 
     fun togglePlayedItems(showPlayedItems: Boolean) {
@@ -205,6 +292,8 @@ class FeedViewModel(
     fun getShowPlayedItemsFromPreferences() = getShowPlayedItemsFromPreferences(applicationContext)
 
     companion object {
+        private const val TAG = "FeedViewModel"
+
         private fun getShowPlayedItemsFromPreferences(context: Context) =
             PreferenceManager.getDefaultSharedPreferences(context)
                 .getBoolean(context.getString(R.string.feed_show_played_items_key), true)

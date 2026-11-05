@@ -25,6 +25,7 @@ import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
+import android.os.SystemClock
 import android.graphics.Typeface
 import android.graphics.drawable.LayerDrawable
 import android.os.Bundle
@@ -119,8 +120,6 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
     private var updateListViewModeOnResume = false
     private var updatePullToRefreshOnResume = false
     private var isRefreshing = false
-    // Slice 1: transient failed-sticky header state (no rotation survival; promoted to VM in 3b).
-    private var failedSticky = false
     private var notLoadedDialog: AlertDialog? = null
     private var feedNotAvailableDialog: AlertDialog? = null
     private var infoItemDialog: InfoItemDialog? = null
@@ -221,6 +220,8 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
         val factory = FeedViewModel.Factory(requireContext(), groupId)
         viewModel = ViewModelProvider(this, factory).get(FeedViewModel::class.java)
         showPlayedItems = viewModel.getShowPlayedItemsFromPreferences()
+        // Bundle backup for process death; rotation keeps the VM instance itself.
+        savedInstanceState?.getString("feedQuery")?.let { viewModel.savedQuery = it }
         viewModel.stateLiveData.observe(viewLifecycleOwner) { it?.let(::handleResult) }
 
         groupAdapter = GroupieAdapter().apply {
@@ -539,6 +540,16 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
         super.onSaveInstanceState(outState)
         listState?.let { outState.putParcelable("listState", it) }
         outState.putBoolean("showPlayedItems", showPlayedItems)
+        try {
+            if (::viewModel.isInitialized) {
+                viewModel.savedQuery?.let { outState.putString("feedQuery", it) }
+            } else {
+                editText?.text?.toString()?.takeIf { it.isNotEmpty() }?.let {
+                    outState.putString("feedQuery", it)
+                }
+            }
+        } catch (e: Exception) {
+        }
         outState.putBundle("selection", Bundle().also { selection.saveState(it) })
     }
 
@@ -604,6 +615,12 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
         } catch (e: Exception) {
             // ignore
         }
+        try {
+            val restored = if (::viewModel.isInitialized) viewModel.savedQuery else null
+            if (!restored.isNullOrEmpty()) editText?.setText(restored)
+        } catch (e: Exception) {
+            // ignore
+        }
         editText?.addTextChangedListener(textWatcher)
 
         setupTouchListeners(feedBinding.root)
@@ -653,21 +670,33 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
         }
     }
 
-    private fun filterItems(text: String) {
-        isFilterEnabled = text.isNotEmpty()
-        filteredItems.clear()
-
-        if (text.isEmpty()) {
-            filteredItems.addAll(originalItems)
-        } else {
+    private fun rebuildFilteredList(query: String?) {
+        if (!query.isNullOrEmpty()) {
+            isFilterEnabled = true
+            filteredItems.clear()
             for (item in originalItems) {
                 val stream = item.streamWithState.stream
-                if (stream.title.lowercase().contains(text.lowercase()) ||
-                    stream.uploader.lowercase().contains(text.lowercase()) == true) {
+                if (stream.title.lowercase().contains(query.lowercase()) ||
+                    stream.uploader.lowercase().contains(query.lowercase()) == true) {
                     filteredItems.add(item)
                 }
             }
+        } else {
+            isFilterEnabled = false
+            filteredItems.clear()
+            filteredItems.addAll(originalItems)
         }
+    }
+
+    private fun filterItems(text: String) {
+        try {
+            if (::viewModel.isInitialized) {
+                viewModel.savedQuery = text.ifEmpty { null }
+                viewModel.filterGeneration++
+            }
+        } catch (e: Exception) {
+        }
+        rebuildFilteredList(text.ifEmpty { null })
 
         // Use synchronous update to avoid race conditions during rapid filtering
         try {
@@ -684,6 +713,13 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
     }
 
     private fun clearFilter() {
+        try {
+            if (::viewModel.isInitialized) {
+                viewModel.savedQuery = null
+                viewModel.filterGeneration++
+            }
+        } catch (e: Exception) {
+        }
         isFilterEnabled = false
         filteredItems.clear()
         // Cancel any ongoing diff operations before starting a new one
@@ -805,6 +841,44 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
     }
 
     private fun handleRefreshingState(state: FeedState.RefreshingState) {
+        if (::groupAdapter.isInitialized && groupAdapter.itemCount == 0 &&
+            state.items.isNotEmpty()
+        ) {
+            // Rotation re-derive: repopulate kept rows from the replayed state.
+            // No celebration here — the terminal has not arrived yet.
+            val itemVersion = try {
+                when (getItemViewMode(requireContext())) {
+                    ItemViewMode.GRID -> StreamItem.ItemVersion.GRID
+                    ItemViewMode.CARD -> StreamItem.ItemVersion.CARD
+                    else -> StreamItem.ItemVersion.NORMAL
+                }
+            } catch (e: Exception) {
+                StreamItem.ItemVersion.NORMAL
+            }
+            state.items.forEach { it.itemVersion = itemVersion }
+            originalItems.clear()
+            originalItems.addAll(state.items)
+            selection.retainOnly(state.items.map { it.streamWithState.stream.uid })
+            state.items.forEach {
+                it.isItemSelected = selection.isSelected(it.streamWithState.stream.uid)
+            }
+            val query = try {
+                viewModel.savedQuery?.takeIf { it.isNotEmpty() }
+            } catch (e: Exception) {
+                null
+            }
+            rebuildFilteredList(query)
+            val shown = if (isFilterEnabled) filteredItems else originalItems
+            groupAdapter.updateAsync(shown, false, null)
+            listState?.run {
+                try {
+                    feedBinding.itemsList.layoutManager?.onRestoreInstanceState(listState)
+                } catch (e: Exception) {
+                }
+                listState = null
+            }
+            playlistControlBinding?.root?.isVisible = shown.isNotEmpty()
+        }
         showLoading()
         updateRefreshingHeader(state)
         startRefreshIconSpin()
@@ -950,9 +1024,14 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
 
     @SuppressLint("StringFormatMatches")
     private fun handleLoadedState(loadedState: FeedState.LoadedState) {
-        // A scoped Success clears the transient failed-sticky header (slice 1: any LoadedState).
-        failedSticky = false
         snackbar?.dismiss()
+        // Scoped celebration (slice 3b): only a fresh non-cancelled Success sets the
+        // pending flag; DB-only recombines never do. Selection skips + freezes the count.
+        val celebrate = try {
+            viewModel.consumeCelebration() && !selection.isActive
+        } catch (e: Exception) {
+            !selection.isActive
+        }
         val itemVersion = when (getItemViewMode(requireContext())) {
             ItemViewMode.GRID -> StreamItem.ItemVersion.GRID
             ItemViewMode.CARD -> StreamItem.ItemVersion.CARD
@@ -965,20 +1044,46 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
         selection.retainOnly(loadedState.items.map { it.streamWithState.stream.uid })
         loadedState.items.forEach { it.isItemSelected = selection.isSelected(it.streamWithState.stream.uid) }
 
-        // Store original items for filtering
+        // Store original items for filtering; re-apply the saved query without scroll jump
+        // (never via filterItems, which scrolls to top).
         originalItems.clear()
         originalItems.addAll(loadedState.items)
-        filteredItems.clear()
-        filteredItems.addAll(originalItems)
+        val query = try {
+            viewModel.savedQuery?.takeIf { it.isNotEmpty() }
+        } catch (e: Exception) {
+            null
+        } ?: editText?.text?.toString()?.takeIf { it.isNotEmpty() }
+        rebuildFilteredList(query)
+        val shownItems = if (isFilterEnabled) filteredItems else originalItems
+        val unfilteredEmpty = loadedState.items.isEmpty()
+        val filteredEmpty = !unfilteredEmpty && shownItems.isEmpty()
 
-        playlistControlBinding?.root?.isVisible = loadedState.items.isNotEmpty()
+        // Playlist follows the shown (filtered when filtering) size.
+        playlistControlBinding?.root?.isVisible = shownItems.isNotEmpty()
 
         // This need to be saved in a variable as the update occurs async
         val oldOldestSubscriptionUpdate = oldestSubscriptionUpdate
+        val applyGen = try {
+            viewModel.filterGeneration
+        } catch (e: Exception) {
+            -1L
+        }
 
-        groupAdapter.updateAsync(loadedState.items, false) {
-            oldOldestSubscriptionUpdate?.run {
-                highlightNewItemsAfter(oldOldestSubscriptionUpdate)
+        if (filteredEmpty) {
+            // Filtered-empty: visible empty list, hidden playlist, no celebration.
+            groupAdapter.updateAsync(shownItems, false, null)
+        } else {
+            groupAdapter.updateAsync(shownItems, false) {
+                if (!celebrate) return@updateAsync
+                val stillCurrent = try {
+                    viewModel.filterGeneration == applyGen
+                } catch (e: Exception) {
+                    true
+                }
+                if (!stillCurrent) return@updateAsync
+                oldOldestSubscriptionUpdate?.run {
+                    highlightNewItemsAfter(oldOldestSubscriptionUpdate)
+                }
             }
         }
         listState?.run {
@@ -986,26 +1091,31 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
             listState = null
         }
 
-        val feedsNotLoaded = loadedState.notLoadedCount > 0
-        feedBinding.refreshSubtitleText.isVisible = feedsNotLoaded
-        if (feedsNotLoaded) {
-            feedBinding.refreshSubtitleText.text = getString(
-                R.string.feed_subscription_not_loaded_count,
-                loadedState.notLoadedCount
-            )
+        if (filteredEmpty) {
+            feedBinding.refreshSubtitleText.isVisible = true
+            feedBinding.refreshSubtitleText.text = getString(R.string.feed_no_filter_results)
+            feedBinding.refreshSubtitleText.contentDescription =
+                getString(R.string.feed_no_filter_results)
+        } else {
+            val feedsNotLoaded = loadedState.notLoadedCount > 0
+            feedBinding.refreshSubtitleText.isVisible = feedsNotLoaded
+            if (feedsNotLoaded) {
+                feedBinding.refreshSubtitleText.text = getString(
+                    R.string.feed_subscription_not_loaded_count,
+                    loadedState.notLoadedCount
+                )
+            }
         }
 
-        if (oldestSubscriptionUpdate != loadedState.oldestUpdate ||
-            (oldestSubscriptionUpdate == null && loadedState.oldestUpdate == null)
-        ) {
-            // ignore errors if they have already been handled for the current update
-            handleItemsErrors(loadedState.itemsErrors)
-        }
+        // Error-set gate removed (slice 3b): the VM dedupes identical sets, so surface
+        // unconditionally; same set consecutively never re-fires.
+        handleItemsErrors(loadedState.itemsErrors)
         oldestSubscriptionUpdate = loadedState.oldestUpdate
 
-        if (loadedState.items.isEmpty()) {
+        if (unfilteredEmpty) {
             showEmptyState()
         } else {
+            // Filtered-empty also settles here: visible RV with 0 rows, empty view hidden.
             hideLoading()
         }
     }
@@ -1019,7 +1129,7 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
             true
         } else {
             // Fatal-with-content: keep stale list + header, offer snackbar + header retry.
-            failedSticky = true
+            // failedSticky lives in the VM (set on the scoped Error pass-through).
             hideLoading()
             updateRefreshViewState()
             showFatalSnackbar(errorState.error)
@@ -1181,7 +1291,12 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
             R.string.feed_oldest_subscription_update,
             oldestSubscriptionUpdate?.let { Localization.relativeTime(it) } ?: "\u2014"
         )
-        if (failedSticky) {
+        val sticky = try {
+            ::viewModel.isInitialized && viewModel.failedSticky
+        } catch (e: Exception) {
+            false
+        }
+        if (sticky) {
             feedBinding.refreshSubtitleText.isVisible = true
             feedBinding.refreshSubtitleText.text =
                 getString(R.string.feed_refresh_failed_tap_to_retry)
@@ -1325,7 +1440,7 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
     override fun reloadContent() {
         try {
             if (::viewModel.isInitialized) {
-                viewModel.onReloadRequested()
+                viewModel.onReloadRequested(SystemClock.elapsedRealtime())
             }
         } catch (e: Exception) {
         }
@@ -1334,7 +1449,6 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
                 hideErrorPanel()
             } catch (e: Exception) {
             }
-            failedSticky = false
             snackbar?.dismiss()
             isRefreshing = true
             if (isPullToRefreshEnabled) {

@@ -291,6 +291,10 @@ class FeedLoadManager(private val context: Context) {
      * Remove streams from the database which are not linked / used by any table.
      */
     private fun postProcessFeed(groupId: Long) = Completable.fromRunnable {
+        // Sampled once at entry: a cancel landing during buffer/DatabaseConsumer/
+        // postProcessFeed still suppresses the celebration; only a cancel arriving
+        // after this sample is missed (documented race, next load is clean).
+        val wasCancelled = cancelSignal.get()
         FeedEventManager.postEvent(
             FeedEventManager.Event.ProgressEvent(
                 R.string.feed_processing_message,
@@ -302,7 +306,8 @@ class FeedLoadManager(private val context: Context) {
         FeedEventManager.postEvent(
             FeedEventManager.Event.SuccessResultEvent(
                 feedResultsHolder.itemsErrors,
-                groupId
+                groupId,
+                wasCancelled
             )
         )
     }.doOnSubscribe {
