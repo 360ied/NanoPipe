@@ -400,6 +400,13 @@
 <!-- Caption Settings -->
 <string name="caption_setting_title">Captions</string>
 <string name="caption_setting_description">Modify player caption text scale and background styles. Requires app restart to take effect</string>
+<string name="caption_language_filter_title">Caption languages</string>
+<string name="caption_language_filter_all">All languages</string>
+<string name="caption_language_filter_dialog_text">Select which subtitle languages are offered in the player. Select none to show all languages. Changes apply when a video\u2019s media source is next loaded; the current video and already-loaded queue items keep their existing captions until then.</string>
+<plurals name="caption_language_filter_count">
+    <item quantity="one">%1$d language selected</item>
+    <item quantity="other">%1$d languages selected</item>
+</plurals>
 <!-- Debug Settings -->
 <string name="leak_canary_not_available">LeakCanary is not available</string>
 <string name="enable_leak_canary_summary">Memory leak monitoring may cause the app to become unresponsive when heap dumping</string>

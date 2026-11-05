@@ -10,6 +10,7 @@ import android.widget.Toast;
 
 import androidx.annotation.Nullable;
 import androidx.appcompat.app.AlertDialog;
+import androidx.preference.MultiSelectListPreference;
 import androidx.preference.Preference;
 import androidx.preference.PreferenceManager;
 
@@ -17,9 +18,15 @@ import com.google.android.material.snackbar.Snackbar;
 
 import org.schabi.newpipe.R;
 import org.schabi.newpipe.error.ErrorUtil;
+import org.schabi.newpipe.util.CaptionLanguageFilter;
+import org.schabi.newpipe.util.CaptionLanguageFilter.LanguageEntry;
 import org.schabi.newpipe.util.CodecSupportDetector;
 import org.schabi.newpipe.util.PermissionHelper;
 
+import java.text.Collator;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
@@ -33,6 +40,11 @@ public class VideoAudioSettingsFragment extends BasePreferenceFragment {
     private static final int IDX_VP9 = 0;
     private static final int IDX_AV1 = 1;
 
+    /** Maximum selected languages listed by name before the summary collapses to a count. */
+    private static final int MAX_NAMES_IN_SUMMARY = 3;
+
+    private List<LanguageEntry> captionLanguageVocabulary;
+
     private SharedPreferences.OnSharedPreferenceChangeListener listener;
     private final CompositeDisposable disposables = new CompositeDisposable();
 
@@ -42,6 +54,12 @@ public class VideoAudioSettingsFragment extends BasePreferenceFragment {
         addPreferencesFromResourceRegistry();
 
         listener = (sharedPreferences, s) -> {
+            if (s.equals(getString(R.string.caption_language_filter_key))) {
+                final Preference changed = findPreference(s);
+                if (changed instanceof MultiSelectListPreference) {
+                    updateCaptionLanguageFilterSummary((MultiSelectListPreference) changed);
+                }
+            }
             if (s.equals(getString(R.string.minimize_on_exit_key))) {
                 final String newSetting = sharedPreferences.getString(s, null);
                 if (newSetting != null
@@ -65,6 +83,56 @@ public class VideoAudioSettingsFragment extends BasePreferenceFragment {
                     runDetection(preference);
                     return true;
                 });
+
+        setupCaptionLanguageFilter();
+    }
+
+    /**
+     * Populate the caption-language checklist vocabulary once and refresh its
+     * summary. No stored selection (empty set) means all languages.
+     */
+    private void setupCaptionLanguageFilter() {
+        final MultiSelectListPreference preference =
+                (MultiSelectListPreference) requirePreference(
+                        R.string.caption_language_filter_key);
+        captionLanguageVocabulary = CaptionLanguageFilter.buildVocabulary(
+                Locale.getDefault(),
+                Arrays.asList(Locale.getAvailableLocales()));
+        final CharSequence[] entries =
+                new CharSequence[captionLanguageVocabulary.size()];
+        final CharSequence[] entryValues =
+                new CharSequence[captionLanguageVocabulary.size()];
+        for (int i = 0; i < captionLanguageVocabulary.size(); i++) {
+            final LanguageEntry entry = captionLanguageVocabulary.get(i);
+            entries[i] = entry.name;
+            entryValues[i] = entry.code;
+        }
+        preference.setEntries(entries);
+        preference.setEntryValues(entryValues);
+        updateCaptionLanguageFilterSummary(preference);
+    }
+
+    private void updateCaptionLanguageFilterSummary(
+            final MultiSelectListPreference preference) {
+        if (!isAdded()) {
+            return;
+        }
+        final Set<String> selected = CaptionLanguageFilter.normalizeSelection(
+                preference.getValues());
+        if (selected.isEmpty()) {
+            preference.setSummary(R.string.caption_language_filter_all);
+            return;
+        }
+        final List<String> names = CaptionLanguageFilter.sortedDisplayNames(
+                selected,
+                CaptionLanguageFilter.nameMap(captionLanguageVocabulary),
+                Collator.getInstance(Locale.getDefault()));
+        if (names.size() <= MAX_NAMES_IN_SUMMARY) {
+            preference.setSummary(android.text.TextUtils.join(", ", names));
+        } else {
+            preference.setSummary(getResources().getQuantityString(
+                    R.plurals.caption_language_filter_count, names.size(), names.size()));
+        }
     }
 
     /**
@@ -166,6 +234,11 @@ public class VideoAudioSettingsFragment extends BasePreferenceFragment {
         super.onResume();
         getPreferenceManager().getSharedPreferences()
                 .registerOnSharedPreferenceChangeListener(listener);
+        final Preference preference =
+                findPreference(getString(R.string.caption_language_filter_key));
+        if (preference instanceof MultiSelectListPreference) {
+            updateCaptionLanguageFilterSummary((MultiSelectListPreference) preference);
+        }
     }
 
     @Override

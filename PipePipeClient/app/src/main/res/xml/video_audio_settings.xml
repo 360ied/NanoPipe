@@ -140,6 +140,14 @@
             app:singleLineTitle="false"
             app:iconSpaceReserved="false" />
 
+    <MultiSelectListPreference
+            android:key="@string/caption_language_filter_key"
+            android:title="@string/caption_language_filter_title"
+            android:summary="@string/caption_language_filter_all"
+            android:dialogMessage="@string/caption_language_filter_dialog_text"
+            app:singleLineTitle="false"
+            app:iconSpaceReserved="false" />
+
     <SwitchPreferenceCompat
             android:defaultValue="true"
             android:key="@string/rotate_fullscreen_to_video_orientation_key"

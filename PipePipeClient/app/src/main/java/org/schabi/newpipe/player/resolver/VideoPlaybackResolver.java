@@ -5,6 +5,7 @@ import android.net.Uri;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
+import androidx.preference.PreferenceManager;
 
 import com.google.android.exoplayer2.C;
 import com.google.android.exoplayer2.MediaItem;
@@ -19,11 +20,13 @@ import org.schabi.newpipe.extractor.stream.StreamInfo;
 import org.schabi.newpipe.extractor.stream.StreamType;
 import org.schabi.newpipe.extractor.stream.SubtitlesStream;
 import org.schabi.newpipe.extractor.stream.VideoStream;
+import org.schabi.newpipe.R;
 import org.schabi.newpipe.player.helper.PlayerDataSource;
 import org.schabi.newpipe.player.helper.PlayerHelper;
 import org.schabi.newpipe.player.mediaitem.PlayerMediaItem;
 import org.schabi.newpipe.player.mediaitem.MediaItemQuality;
 import org.schabi.newpipe.util.AudioStreamSelector;
+import org.schabi.newpipe.util.CaptionLanguageFilter;
 import org.schabi.newpipe.util.VideoStreamSelector;
 
 import java.io.IOException;
@@ -202,7 +205,11 @@ public class VideoPlaybackResolver implements PlaybackResolver {
         // Below are auxiliary media sources
 
         // Create subtitle sources
-        final List<SubtitlesStream> subtitlesStreams = info.getSubtitles();
+        final List<SubtitlesStream> subtitlesStreams = new ArrayList<>(
+                CaptionLanguageFilter.filterSubtitles(
+                        PreferenceManager.getDefaultSharedPreferences(context).getStringSet(
+                                context.getString(R.string.caption_language_filter_key), null),
+                        info.getSubtitles()));
         if (subtitlesStreams != null) {
             // Torrent and non URL subtitles are not supported by ExoPlayer
             final List<SubtitlesStream> nonTorrentAndUrlStreams = removeTorrentStreams(
