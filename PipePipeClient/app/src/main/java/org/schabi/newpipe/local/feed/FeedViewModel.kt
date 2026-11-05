@@ -39,6 +39,7 @@ class FeedViewModel(
     initialShowPlayedItems: Boolean = true,
     eventsSource: Flowable<Event> = FeedEventManager.events(),
     ioScheduler: Scheduler = Schedulers.io(),
+    // Must stay a main-thread scheduler: the subscriber below posts via setValue.
     mainScheduler: Scheduler = AndroidSchedulers.mainThread()
 ) : ViewModel() {
     private var feedDatabaseManager: FeedDatabaseManager = FeedDatabaseManager(applicationContext)
@@ -107,9 +108,12 @@ class FeedViewModel(
                 event.groupId != FeedLoadManager.GROUP_NOTIFICATION_ENABLED)
 
     /** Monotonic load id. Terminals stamp the generation they belong to so renders
-        can tell a current terminal from a stale replay. */
+        can tell a current terminal from a stale replay. Volatile: the map stage
+        reads both generations off the main thread (suppressed-error gate). */
+    @Volatile
     var loadGeneration = 0L
         private set
+    @Volatile
     var terminalGeneration = -1L
         private set
 
@@ -197,15 +201,25 @@ class FeedViewModel(
             // Suppressed terminals are DB-recombine replays of an already-handled
             // instance: the first pass ran the scoped side-effects, so re-running
             // them would clear a legitimately tripped sticky or re-stamp state.
+            // consumedTerminal is written on main but read here on ioScheduler;
+            // a race renders the terminal twice at most, absorbed downstream by
+            // the view's surfaced-error-set guard.
             val suppressed = (event is SuccessResultEvent || event is ErrorResultEvent) &&
                 event === consumedTerminal
             if (!suppressed) {
                 onScopedEvent(event)
             }
             // Fatal errors re-post their cached outcome (panel persists across
-            // recombines); successes downgrade to a silent Idle recombine.
+            // recombines); successes downgrade to a silent Idle recombine. The
+            // re-post is gated on the current generation: after a reload, a
+            // recombine still carrying the previous load's terminal must neither
+            // re-surface its error nor stamp the new load's generation.
             val effectiveEvent = if (suppressed) {
-                if (event is ErrorResultEvent) event else IdleEvent()
+                if (event is ErrorResultEvent && terminalGeneration == loadGeneration) {
+                    event
+                } else {
+                    IdleEvent()
+                }
             } else {
                 event
             }
@@ -234,6 +248,10 @@ class FeedViewModel(
             if (queryError != null) {
                 // Query failures surface transiently (snackbar/panel) like before:
                 // only event terminals persist sticky failure across rotation.
+                // Note: this render cancels the armed timer (handleErrorState owns
+                // the spinner), so a persistently throwing DB mid-load disarms the
+                // net while the service still stalls — narrow enough to document,
+                // not to widen the sticky contract for.
                 mutableStateLiveData.value = FeedState.ErrorState(queryError)
                 return@subscribe
             }

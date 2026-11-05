@@ -148,8 +148,9 @@ class FeedLoadManager(private val context: Context) {
                         // a long service-throttle wait completes this rail immediately
                         // instead of letting the action appear dead. Dropped rails emit
                         // nothing: below-max progress at a cancelled terminal is expected.
-                        // Zero-wait rails skip the poller entirely (no timer cost).
-                        if (wait > 0) {
+                        // Sub-poll-interval waits skip the poller: a 50 ms timer could
+                        // never fire before them anyway.
+                        if (wait > CANCEL_POLL_INTERVAL_MS) {
                             delayed.takeUntil(
                                 Flowable.interval(
                                     CANCEL_POLL_INTERVAL_MS,

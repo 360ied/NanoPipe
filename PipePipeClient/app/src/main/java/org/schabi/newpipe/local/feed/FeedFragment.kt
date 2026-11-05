@@ -56,13 +56,13 @@ import com.google.android.material.snackbar.Snackbar
 import com.xwray.groupie.GroupieAdapter
 import com.xwray.groupie.Item
 import com.xwray.groupie.OnAsyncUpdateListener
+import com.xwray.groupie.OnItemClickListener
+import com.xwray.groupie.OnItemLongClickListener
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import com.xwray.groupie.OnItemClickListener
-import com.xwray.groupie.OnItemLongClickListener
 import io.reactivex.rxjava3.android.schedulers.AndroidSchedulers
 import io.reactivex.rxjava3.core.Single
 import io.reactivex.rxjava3.disposables.CompositeDisposable
@@ -106,6 +106,7 @@ import org.schabi.newpipe.util.ThemeHelper.getItemViewMode
 import org.schabi.newpipe.util.ThemeHelper.resolveDrawable
 import org.schabi.newpipe.util.ThemeHelper.shouldUseGridLayout
 import java.time.OffsetDateTime
+import java.util.concurrent.TimeoutException
 import java.util.function.Consumer
 
 class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
@@ -305,6 +306,7 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
                     try {
                         updateRefreshViewState()
                     } catch (e: Exception) {
+                        // ignore: header best-effort on the sticky re-show path
                     }
                 } else {
                     val requestedAt = viewModel.refreshRequestedAt
@@ -662,6 +664,7 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
                 }
             }
         } catch (e: Exception) {
+            // ignore: selection state is best-effort across recreation
         }
         outState.putBundle("selection", Bundle().also { selection.saveState(it) })
     }
@@ -826,6 +829,7 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
             try {
                 itemsList.layoutManager?.scrollToPosition(0)
             } catch (e: Exception) {
+                // ignore: scroll hint only, layout may be mid-update
             }
         }
     }
@@ -837,10 +841,12 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
                 viewModel.filterGeneration++
             }
         } catch (e: Exception) {
+            // ignore: filter affordance only, query continues unfiltered
         }
         isFilterEnabled = false
         filteredItems.clear()
-        // Cancel any ongoing diff operations before starting a new one
+        // Join the async diff chain when one is in flight (see pushSyncOrAsync),
+        // otherwise a sync update would race the background DiffUtil pass.
         try {
             // Update synchronously to avoid race conditions
             pushSyncOrAsync(originalItems)
@@ -854,6 +860,7 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
             try {
                 itemsList.layoutManager?.scrollToPosition(0)
             } catch (e: Exception) {
+                // ignore: scroll hint only, layout may be mid-update
             }
         }
     }
@@ -1276,6 +1283,7 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
         // Re-render guard (pass 2): the VM dedupes across terminals, but re-rendering
         // the same LoadedState (view-mode toggle, rotation replay) bypasses it.
         // Surface only when the set changed since this view last surfaced it.
+        // Rotation re-surface is intentional: the dialog died with the old view.
         val errorSet = try {
             viewModel.errorSetKey(loadedState.itemsErrors)
         } catch (e: Exception) {
@@ -1390,9 +1398,17 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
         } catch (e: Exception) {
         }
         if (!hasVisibleOrHiddenContent()) {
-            // No-content timeout mirrors the fatal path: error container, no
-            // infinite centered spinner, header retry + snackbar below.
+            // No-content timeout mirrors the fatal path: clear the spinners, then
+            // show the error panel — no later render carries a retry, so without
+            // the panel the screen would go blank once the snackbar dismisses.
             handleError()
+            showError(
+                ErrorInfo(
+                    TimeoutException("feed refresh timed out"),
+                    UserAction.REQUESTED_FEED,
+                    "Loading feed"
+                )
+            )
         } else {
             isRefreshing = false
             try {
@@ -1492,6 +1508,7 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
                 .observeOn(AndroidSchedulers.mainThread())
                 .subscribe(
                     { subscriptions ->
+                        if (!isAdded) return@subscribe
                         if (subscriptions.isEmpty()) {
                             return@subscribe
                         }
@@ -1531,6 +1548,7 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
         @Nullable cause: Throwable?,
         nextItemsErrors: List<Throwable>
     ) {
+        if (!isAdded) return
         val sharedPreferences = PreferenceManager.getDefaultSharedPreferences(requireContext())
         val isFastFeedModeEnabled = sharedPreferences.getBoolean(
             getString(R.string.feed_use_dedicated_fetch_method_key), false
@@ -1598,6 +1616,9 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
                 getString(R.string.feed_refresh_failed_tap_to_retry)
             feedBinding.refreshRootView.contentDescription =
                 getString(R.string.feed_refresh_failed_tap_to_retry)
+            // The subtitle listener belongs to the filter-empty state (set in
+            // handleLoadedState): a sticky overwrite must not inherit its action.
+            feedBinding.refreshSubtitleText.setOnClickListener(null)
             feedBinding.refreshIcon.contentDescription =
                 getString(R.string.feed_refresh_failed_tap_to_retry)
             feedBinding.refreshIcon.isFocusable = false
