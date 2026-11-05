@@ -40,6 +40,12 @@ class FeedViewModel(
     private val mutableStateLiveData = MutableLiveData<FeedState>()
     val stateLiveData: LiveData<FeedState> = mutableStateLiveData
 
+    private var seenNonProcessingProgress = false
+
+    fun onReloadRequested() {
+        seenNonProcessingProgress = false
+    }
+
     private var combineDisposable = Flowable
         .combineLatest(
             FeedEventManager.events(),
@@ -56,7 +62,7 @@ class FeedViewModel(
         .subscribeOn(Schedulers.io())
         .observeOn(Schedulers.io())
         .map { (event, showPlayedItems, notLoadedCount, oldestUpdate) ->
-            val streamItems = if (event is SuccessResultEvent || event is IdleEvent)
+            val streamItems = if (event is SuccessResultEvent || event is IdleEvent || event is ProgressEvent)
                 feedDatabaseManager
                     .getStreams(groupId, showPlayedItems)
                     .blockingGet(arrayListOf())
@@ -67,17 +73,66 @@ class FeedViewModel(
         }
         .observeOn(AndroidSchedulers.mainThread())
         .subscribe { (event, listFromDB, notLoadedCount, oldestUpdate) ->
-            mutableStateLiveData.postValue(
-                when (event) {
-                    is IdleEvent -> FeedState.LoadedState(listFromDB.map { e -> StreamItem(e) }, oldestUpdate, notLoadedCount)
-                    is ProgressEvent -> FeedState.ProgressState(event.currentProgress, event.maxProgress, event.progressMessage)
-                    is SuccessResultEvent -> FeedState.LoadedState(listFromDB.map { e -> StreamItem(e) }, oldestUpdate, notLoadedCount, event.itemsErrors)
-                    is ErrorResultEvent -> FeedState.ErrorState(event.error)
+            when (event) {
+                is ProgressEvent -> {
+                    if (event.maxProgress > 0 || event.currentProgress >= 0) {
+                        seenNonProcessingProgress = true
+                    }
+                    val isProcessingOnly = event.currentProgress == -1 &&
+                        event.maxProgress == -1 &&
+                        event.progressMessage == R.string.feed_processing_message
+                    if (listFromDB.isEmpty()) {
+                        mutableStateLiveData.postValue(
+                            FeedState.ProgressState(
+                                event.currentProgress,
+                                event.maxProgress,
+                                event.progressMessage
+                            )
+                        )
+                    } else if (isProcessingOnly && !seenNonProcessingProgress) {
+                        // No-op refresh: emit nothing observable, fragment never enters spinner path.
+                        return@subscribe
+                    } else {
+                        mutableStateLiveData.postValue(
+                            FeedState.RefreshingState(
+                                listFromDB.map { e -> StreamItem(e) },
+                                event.currentProgress,
+                                event.maxProgress,
+                                event.progressMessage,
+                                oldestUpdate,
+                                notLoadedCount
+                            )
+                        )
+                    }
                 }
-            )
-
-            if (event is ErrorResultEvent || event is SuccessResultEvent) {
-                FeedEventManager.reset()
+                is IdleEvent -> {
+                    mutableStateLiveData.postValue(
+                        FeedState.LoadedState(
+                            listFromDB.map { e -> StreamItem(e) },
+                            oldestUpdate,
+                            notLoadedCount
+                        )
+                    )
+                }
+                is SuccessResultEvent -> {
+                    // Fresh DB query already resolved above; no-op gate holds here when only
+                    // processing-only progress was seen — still emit fresh LoadedState silently.
+                    mutableStateLiveData.postValue(
+                        FeedState.LoadedState(
+                            listFromDB.map { e -> StreamItem(e) },
+                            oldestUpdate,
+                            notLoadedCount,
+                            event.itemsErrors
+                        )
+                    )
+                    seenNonProcessingProgress = false
+                    FeedEventManager.reset()
+                }
+                is ErrorResultEvent -> {
+                    mutableStateLiveData.postValue(FeedState.ErrorState(event.error))
+                    seenNonProcessingProgress = false
+                    FeedEventManager.reset()
+                }
             }
         }
 

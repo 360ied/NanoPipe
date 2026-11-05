@@ -19,6 +19,7 @@
 
 package org.schabi.newpipe.local.feed
 
+import android.animation.ObjectAnimator
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.Context
@@ -32,6 +33,7 @@ import android.text.Editable
 import android.text.TextWatcher
 import android.util.Log
 import android.view.*
+import android.view.animation.LinearInterpolator
 import android.view.inputmethod.InputMethodManager
 import android.widget.Button
 import android.widget.EditText
@@ -123,6 +125,7 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
     private var feedNotAvailableDialog: AlertDialog? = null
     private var infoItemDialog: InfoItemDialog? = null
     private var snackbar: Snackbar? = null
+    private var refreshIconAnimator: ObjectAnimator? = null
 
     private var lastNewItemsCount = 0
 
@@ -504,6 +507,7 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
         tryGetNewItemsLoadedButton()?.clearAnimation()
 
         selection.setListener(null)
+        stopRefreshIconSpin()
         notLoadedDialog?.dismiss()
         notLoadedDialog = null
         feedNotAvailableDialog?.dismiss()
@@ -753,6 +757,7 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
 
     override fun hideLoading() {
         super.hideLoading()
+        stopRefreshIconSpin()
         feedBinding.itemsList.animate(true, 0)
         feedBinding.refreshRootView.animate(true, 200)
         feedBinding.loadingProgressText.animate(false, 0)
@@ -762,6 +767,7 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
 
     override fun showEmptyState() {
         super.showEmptyState()
+        stopRefreshIconSpin()
         feedBinding.itemsList.animateHideRecyclerViewAllowingScrolling()
         feedBinding.refreshRootView.animate(true, 200)
         feedBinding.loadingProgressText.animate(false, 0)
@@ -773,6 +779,7 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
     override fun handleResult(result: FeedState) {
         when (result) {
             is FeedState.ProgressState -> handleProgressState(result)
+            is FeedState.RefreshingState -> handleRefreshingState(result)
             is FeedState.LoadedState -> handleLoadedState(result)
             is FeedState.ErrorState -> if (handleErrorState(result)) return
         }
@@ -782,6 +789,7 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
 
     override fun handleError() {
         super.handleError()
+        stopRefreshIconSpin()
         val hasContent = try {
             ::groupAdapter.isInitialized && groupAdapter.itemCount > 0
         } catch (e: Exception) {
@@ -794,6 +802,83 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
         feedBinding.loadingProgressText.animate(false, 0)
         feedBinding.swipeRefreshLayout.isRefreshing = false
         isRefreshing = false
+    }
+
+    private fun handleRefreshingState(state: FeedState.RefreshingState) {
+        showLoading()
+        updateRefreshingHeader(state)
+        startRefreshIconSpin()
+    }
+
+    private fun updateRefreshingHeader(state: FeedState.RefreshingState) {
+        val refreshingText: String? = when {
+            state.maxProgress > 0 && state.currentProgress >= 0 ->
+                getString(
+                    R.string.feed_refreshing_progress,
+                    state.currentProgress,
+                    state.maxProgress
+                )
+            state.maxProgress > 0 && state.currentProgress == -1 -> {
+                Log.w(
+                    "FeedRefresh",
+                    "mixed progress current=-1 max=${state.maxProgress}"
+                )
+                getString(R.string.feed_refreshing_progress, 0, state.maxProgress)
+            }
+            state.progressMessage != 0 -> getString(state.progressMessage)
+            else -> null
+        }
+        val combinedText: String? = if (
+            refreshingText != null && state.notLoadedCount > 0
+        ) {
+            getString(
+                R.string.feed_refreshing_with_not_loaded,
+                refreshingText,
+                getString(
+                    R.string.feed_subscription_not_loaded_count,
+                    state.notLoadedCount
+                )
+            )
+        } else {
+            refreshingText
+        }
+        if (combinedText != null) {
+            feedBinding.refreshSubtitleText.isVisible = true
+            feedBinding.refreshSubtitleText.text = combinedText
+            feedBinding.refreshSubtitleText.contentDescription = combinedText
+        } else {
+            feedBinding.refreshSubtitleText.isVisible = false
+            feedBinding.refreshSubtitleText.text = ""
+            feedBinding.refreshSubtitleText.contentDescription = null
+        }
+    }
+
+    private fun startRefreshIconSpin() {
+        try {
+            val view = _feedBinding?.refreshIcon ?: return
+            if (refreshIconAnimator?.isRunning == true) return
+            refreshIconAnimator?.cancel()
+            refreshIconAnimator = ObjectAnimator.ofFloat(view, "rotation", 0f, 360f).apply {
+                duration = 1000
+                interpolator = LinearInterpolator()
+                repeatCount = ObjectAnimator.INFINITE
+                start()
+            }
+        } catch (e: Exception) {
+            Log.w("FeedRefresh", "spin start failed", e)
+        }
+    }
+
+    private fun stopRefreshIconSpin() {
+        try {
+            refreshIconAnimator?.cancel()
+        } catch (e: Exception) {
+        }
+        refreshIconAnimator = null
+        try {
+            _feedBinding?.refreshIcon?.rotation = 0f
+        } catch (e: Exception) {
+        }
     }
 
     private fun handleProgressState(progressState: FeedState.ProgressState) {
@@ -1238,6 +1323,12 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
     override fun doInitialLoadLogic() {}
 
     override fun reloadContent() {
+        try {
+            if (::viewModel.isInitialized) {
+                viewModel.onReloadRequested()
+            }
+        } catch (e: Exception) {
+        }
         if (_feedBinding != null) {
             try {
                 hideErrorPanel()
