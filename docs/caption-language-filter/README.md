@@ -1,239 +1,272 @@
 # Caption language filter — implementation plan
 
-Add a transient, text-based language filter to the player's caption
-chooser without changing which caption streams are extracted, loaded, or
-selected by ExoPlayer.
+Add a Settings-based caption-language allowlist. Users choose languages from
+a standard multi-choice checklist; the existing player caption popup then
+shows only tracks in those languages. No search field, freeform text, or
+keyboard input is added to ExoPlayer.
 
 - Status: **proposed; not implemented**.
-- Audited: 2026-11-04, `main` at `f6cc6e6` (revalidate references before
+- Audited: 2026-11-04, `main` at `f3c73f0` (revalidate references before
   implementation).
-- Scope: the caption chooser opened from the player controls.
-- Interpretation: "filter by language" means typing part of a visible
-  language name to narrow the current chooser. It does **not** mean a
-  persistent language allowlist, automatic caption selection, or filtering
-  the download dialog's subtitle spinner.
+- Scope: **Settings → Video and audio** and player subtitle-source creation.
+- Default: no languages selected means **show all**, preserving current
+  behavior for every existing user.
 - All paths below are relative to the repository root.
 
-## 1. Does the feature already exist?
+## 1. Existing behavior and feature audit
 
-**No caption-list language filter exists in the audited tree.** A
-repository-wide search for caption/subtitle filtering and language-specific
-selection found these related but different behaviors:
+No caption-language filter exists in the audited tree.
 
-| Existing behavior | Evidence | Why it is not this feature |
-| --- | --- | --- |
-| The player lists every available caption | `PlayerTracksController.onTextTracksChanged()` collects every text track's language label and passes the complete list to `PlayerMenuController.buildCaptionMenu()` (`PlayerTracksController.kt:47-86`, `PlayerMenuController.kt:256-312`). | There is no query input, filtered projection, or language allowlist. The only non-language row is `No Captions`. |
-| A chosen caption is remembered | Selecting a row stores its label in `caption_user_set_key`; later track updates restore that preferred label (`PlayerMenuController.kt:283-351`, `settings_keys.xml:210-211`). | This reselects a caption. It does not hide nonmatching rows. |
-| Auto-generated tracks are labelled | `PlayerHelper.captionLanguageOf()` appends the localized `Auto-generated` suffix (`PlayerHelper.java:173-188`). | This is display metadata, not filtering. |
-| YouTube auto-translation has settings | `advanced_settings.xml:229-243` exposes `show_auto_translated_subtitles` and `auto_translated_subtitles_language`; `ServiceHelper.java:227-235` passes them to the extractor. | These choose at most one additional translation target and whether that additional track may be added. They do not filter the chooser by an arbitrary typed language. |
-| The extractor creates the subtitle stream list | `YoutubeStreamExtractor.getSubtitles()` always iterates the source `captionTracks`; it conditionally appends one auto-translated stream (`YoutubeStreamExtractor.java:1876-1953`). | This controls stream discovery, not the player list's visible rows. Disabling auto-translation does not remove the source's auto-generated caption tracks. |
-| Downloads have a separate subtitle spinner | `DownloadDialog.setupSubtitleSpinner()` and `StreamItemAdapter` render `SubtitlesStream` objects (`DownloadDialog.java:500-507`, `StreamItemAdapter.java:147-176`). | This is a different UI and selection flow; it has no language filter either. |
+- `PlayerTracksController.onTextTracksChanged()` collects every ExoPlayer text
+  track's language label and passes the complete list to
+  `PlayerMenuController.buildCaptionMenu()`
+  (`PlayerTracksController.kt:47-86`, `PlayerMenuController.kt:256-312`).
+- `caption_user_set_key` remembers the selected display label and reapplies it
+  on later track updates. It selects a caption; it does not filter the list.
+- `show_auto_translated_subtitles` and
+  `auto_translated_subtitles_language` control whether YouTube extraction may
+  append one translated track. They are not a general caption allowlist.
+- `YoutubeStreamExtractor.getSubtitles()` always processes the source
+  `captionTracks` and conditionally appends that translation
+  (`YoutubeStreamExtractor.java:1876-1953`). Source auto-generated tracks are
+  still returned when the additional translation is disabled.
+- `DownloadDialog` has a separate subtitle spinner backed directly by
+  `SubtitlesStream` objects. It has no language filter and is not part of this
+  feature.
 
-No caption/subtitle filter implementation was found in the available local
-Git history either. Client and extractor history before their inline commit
-(`8547680`) is squashed locally, so this audit establishes current behavior,
-not an absolute claim about every historical upstream revision.
+The available local history contains no caption-language filter either.
+Client and extractor history before their inline commit (`8547680`) is
+squashed locally, so this establishes current behavior rather than ruling out
+every historical upstream implementation.
 
-### Conclusion
+## 2. User-facing design
 
-This is a new player-UI feature. Existing caption preferences and
-auto-translation settings should remain orthogonal to it. No extractor change
-is needed for a filter over the language names already shown to the user.
+Add **Caption languages** to **Settings → Video and audio**, immediately next
+to the existing Captions preference that opens Android's caption-style
+settings.
 
-## 2. Current player flow and constraints
+Tapping it opens the platform `MultiSelectListPreference` dialog:
 
-1. `VideoPlaybackResolver` creates one ExoPlayer subtitle source per usable
-   `SubtitlesStream` (`VideoPlaybackResolver.java:204-244`). It sets
-   `Format.language` to `PlayerHelper.captionLanguageOf(...)`: the native
-   display language name plus an optional auto-generated suffix.
-2. `PlayerTracksController.onTextTracksChanged()` collects those labels in
-   track order, finds the selected track, rebuilds the caption menu, updates
-   the caption button, and hides the button when no labels are available.
-3. `PlayerMenuController.buildCaptionMenu()` currently does two jobs:
-   - constructs the `No Captions` row and one row per language; and
-   - applies the saved `caption_user_set_key` preference as a side effect.
-4. A language click sets preferred text languages to the full label and its
-   stem via `captionLanguageStemOf()`, sets `ROLE_FLAG_CAPTION`, enables the
-   text renderer, and persists the full label. `No Captions` disables the
-   renderer and removes the saved preference.
+- Each row is a language name with a checkbox.
+- There is no text field and therefore no keyboard interaction.
+- Users can select one language or several languages.
+- Selecting no languages means **All languages**, not **No captions**.
+- The dialog explains: selected languages are shown in the player; select
+  none to show all; changes apply to newly loaded videos.
+- The preference summary shows **All languages** when empty. Otherwise it
+  shows the selected names, collapsing to a count when too many are selected
+  for a concise summary.
 
-Important constraints for the new UI:
+This uses configuration for a durable preference rather than making users
+repeat a search whenever they open the caption popup. The player interaction
+itself remains unchanged: tap the caption button, inspect the shorter popup,
+and select a track or **No Captions**.
 
-- **Filter only the rows, not ExoPlayer's tracks.** Removing tracks or
-  changing resolver input would alter fallback selection and could make the
-  saved caption behave differently merely because a search query is active.
-- **Retain the full unfiltered labels.** The visibility check and saved
-  preference restoration must not operate on a filtered subset.
-- **Keep selection values unchanged.** A filtered row must pass the exact
-  original full label to the existing selector logic. Menu positions in the
-  filtered list are not track indices.
-- **The raw BCP-47 tag is not available in this UI path.** The resolver puts
-  the display label, not `SubtitlesStream.getLanguageTag()`, into
-  `Format.language`. The first version therefore matches visible names only;
-  do not add a parallel label-to-code map or rewrite ExoPlayer language
-  semantics just to support queries such as `en-US`.
-- **Track-list updates can race an open chooser.** A dialog must not retain a
-  previous video's rows or activate a stale language after a queue change.
+### Why a multi-choice setting?
 
-## 3. Proposed user experience
+A single-choice preference would enforce one language even when a user
+regularly watches content in two or more. A checklist handles both cases with
+the same control and does not require a second enable/disable switch.
 
-Replace the caption `PopupMenu` with a small searchable caption dialog:
+### Why empty means all?
 
-- Title: `Captions` (reuse `caption_setting_title`).
-- A focused text field with a new `Filter by language` hint and an accessible
-  label. Show the keyboard after the dialog window is visible.
-- A scrollable list of caption rows. With a blank query, this is the complete
-  current list in its existing order, including auto-generated suffixes.
-- Filtering happens immediately as text changes: trim the query, then use a
-  case-insensitive Unicode `contains` match with `Locale.ROOT`. Preserve
-  source order and duplicate labels; do not sort or deduplicate.
-- Show the existing `search_no_results` string when no language matches.
-- Keep `No Captions` visible outside the filtered language list so it remains
-  available even when the query has no matches.
-- Tapping a language selects it and dismisses the dialog. Back, cancel, and
-  outside-touch dismissal change neither captions nor the saved preference.
-- Clearing the field restores all rows. The query is transient: it is empty
-  on each open and is not stored in preferences or restored for another
-  video.
+Defaulting to all is backward compatible and avoids hiding captions
+immediately after an app upgrade. It also avoids storing every known language
+as the default, which would make newly introduced language entries
+unexpectedly excluded. The dialog text makes the empty-set behavior explicit.
 
-A dialog is preferable to adding more rows to `PopupMenu`: Android's popup
-has no suitable persistent text-input area, and a separate filter-entry popup
-would add an extra step and obscure which query produced the visible list.
+### Why apply on newly loaded videos?
+
+Subtitle sources are assembled while `VideoPlaybackResolver` builds the
+current `MediaSource`. Reloading an active video merely because Settings
+changed would interrupt playback and require position/recovery handling.
+Reading the allowlist at resolution time gives deterministic behavior without
+surprise reloads. Returning to a video that is reloaded, starting another
+video, or restarting playback picks up the new setting.
+
+## 3. Language model and matching
+
+The checklist displays localized language names but stores stable ISO 639-1
+language codes, not display labels.
+
+- Populate entries from `Locale.getAvailableISOLanguages()` rather than
+  duplicating the small auto-translation target list. The latter is only a
+  set of translation targets, not a complete caption-language vocabulary.
+- Display each language with `Locale.getDisplayName()` in the Settings UI
+  locale and sort names with the current locale's `Collator`.
+- Fall back to the uppercase code if a platform locale has no display name.
+- Store normalized lowercase primary codes such as `en`, `fr`, `pt`, and
+  `zh` in a string-set preference.
+- Match against `SubtitlesStream.getLanguageTag()`, which is still available
+  before the resolver converts streams into ExoPlayer sources. Compare the
+  primary language subtags rather than native display names.
+- Selecting `en` therefore includes `en`, `en-US`, and `en-GB`; selecting
+  `pt` includes both `pt-PT` and `pt-BR`. Regional variants are not separate
+  settings in this version.
+- Matching is case-insensitive and tolerates normal BCP-47 tags. Underscore
+  separators may be normalized defensively, but display-label parsing is not
+  allowed.
+- Manual, auto-generated, and auto-translated tracks with the same primary
+  language are treated identically. This setting filters language, not
+  caption provenance.
+- Null, blank, or unparseable track tags do not match a nonempty allowlist.
+  They still appear when the allowlist is empty. `SubtitlesStream` currently
+  requires a nonnull code, so this is defensive behavior rather than an
+  expected YouTube case.
+
+Using raw tags avoids fragile comparisons between Settings names and
+ExoPlayer labels such as `English (Auto-generated)`. It also fixes the main
+limitation of matching visible names: regional tags have well-defined
+language semantics.
 
 ## 4. Implementation steps
 
-### 4.1 Add a pure filtering helper
+### 4.1 Add the Settings preference
 
-Add `player/CaptionLanguageFilter.kt` with one small function that accepts
-the full `List<String>` and a query and returns a new filtered list.
+Add a `MultiSelectListPreference` to
+`PipePipeClient/app/src/main/res/xml/video_audio_settings.xml` near the
+existing Captions preference.
 
-- Blank or whitespace-only input returns all entries.
-- Normalize only for comparison (`trim()` plus `lowercase(Locale.ROOT)`);
-  return the original strings, never normalized labels.
-- Use substring matching so `eng` matches `English` and `auto` can narrow to
-  auto-generated rows.
-- Preserve order, duplicates, and empty-source behavior.
-- Keep this helper free of Android and ExoPlayer dependencies for JVM tests.
+Add resources for:
 
-Matching raw language tags, accent folding, fuzzy matching, and multi-token
-queries are intentionally deferred; none is required for the visible-name
-filter and each would enlarge the data-model or matching contract.
+- `caption_language_filter_key` in `res/values/settings_keys.xml`;
+- the **Caption languages** title;
+- the **All languages** and selected-language summaries; and
+- dialog guidance explaining empty selection and newly-loaded-video
+  behavior.
 
-### 4.2 Introduce a dedicated caption dialog
+No XML language arrays are required because entries and values are generated
+at runtime. An absent, null, or empty stored set all mean no filtering. No
+migration or preferences-version bump is needed.
 
-Add a `CaptionSelectionDialog` view/controller and a
-`res/layout/dialog_caption_selection.xml` containing the filter field, a
-fixed `No Captions` action, a scrollable language list, and an empty-state
-view. Reuse simple list-row styling and the current player dialog theme; no
-new UI library is needed.
+### 4.2 Populate and summarize the checklist
 
-The dialog receives:
+In `VideoAudioSettingsFragment`:
 
-- an immutable snapshot of the full language-label list;
-- an `onLanguageSelected(String)` callback; and
-- an `onCaptionsDisabled()` callback.
+1. Build the sorted language-name/code pairs once when preferences are
+   created and assign them to the preference's entries and entry values.
+2. Render the summary from the stored set and the same name/code mapping.
+3. Extend the existing preference-change listener to refresh that summary
+   when `caption_language_filter_key` changes.
+4. Refresh the summary on resume as well, matching the fragment's existing
+   lifecycle pattern.
 
-It owns only transient UI state (the current query and visible projection)
-and delegates every filtering decision to `CaptionLanguageFilter`. Its
-callbacks return the original label, not a filtered-list position. Manage IME
-visibility when showing and dismissing so the keyboard cannot remain over the
-player after the dialog closes.
+Use a short list of selected names for a small selection and a localized
+`N languages selected` summary beyond that limit. Do not add a custom
+preference dialog; the standard multi-choice UI already supplies checkboxes,
+scrolling, accessibility, TV navigation, and cancellation.
 
-### 4.3 Separate track updates from caption commands
+### 4.3 Add a small language-filter helper
 
-Refactor `PlayerMenuController` without changing selection semantics:
+Add `util/CaptionLanguageFilter.java` with pure, testable matching/filtering
+methods. It should:
 
-- Replace `buildCaptionMenu(availableLanguages)` with an update method that
-  stores the complete list. Keep `availableLanguages` as the canonical source
-  for the next dialog open.
-- Extract the body of the current language click listener into
-  `selectCaptionLanguage(captionLanguage)` and the `No Captions` listener into
-  `disableCaptions()`. The dialog calls these methods, preserving track role
-  flags, language-stem fallback, renderer handling, and preference writes.
-- Move saved-preference restoration out of menu/dialog construction into a
-  distinctly named method called by track updates. Filtering or reopening the
-  dialog must never reapply preferences or cause an
-  `onTextTracksChanged` feedback loop.
-- `onCaptionClicked()` opens the dialog only when the canonical list is
-  nonempty and marks the selector visible just as the old popup did.
-- Route dialog dismissal through the same controls/system-UI cleanup as
-  `PopupMenu.OnDismissListener`, while avoiding a double cleanup when both a
-  popup and dialog callback fire.
-- Extend `closeAllPopupMenus()` to dismiss and clear the caption dialog. Clear
-  and dismiss it on new metadata and whenever text tracks become unsupported
-  or empty. If the track list changes while open, dismiss it rather than let
-  a stale snapshot select into the new list.
+- accept the selected primary-code set and a subtitle list or language tag;
+- return the original `SubtitlesStream` objects in their original order;
+- bypass filtering for an absent/empty selection;
+- normalize and compare primary language subtags;
+- avoid mutating either the preference set or source subtitle list; and
+- handle null/empty lists and defensive malformed tags without throwing.
 
-No `PlayerTracksController` filtering should occur beyond passing the full
-list to the controller and using that same full list for button visibility.
-Early return paths must not leave a previous video's dialog or labels alive.
+Keep SharedPreferences access outside the pure matching method. In
+particular, do not modify the mutable set instance returned by
+`SharedPreferences.getStringSet()`.
 
-### 4.4 Resources and integration cleanup
+### 4.4 Filter only player subtitle sources
 
-- Add only the filter hint and any necessary accessibility strings to
-  `res/values/strings.xml`; reuse `Captions`, `No Captions`, and `No results`.
-- Remove the now-unused `captionPopupMenu` field, its initialization, and its
-  popup dismissal call only after the dialog owns all old entry points.
-- Keep `POPUP_MENU_ID_CAPTION` only if still needed after the refactor;
-  otherwise remove it with the menu builder.
-- Leave `caption_user_set_key`, auto-translation settings, resolver source
-  creation, `PlayerHelper.captionLanguageOf()`, and language-stem selection
-  unchanged.
+In `VideoPlaybackResolver.resolve(...)`, read the selected set from default
+SharedPreferences and apply `CaptionLanguageFilter` to `info.getSubtitles()`
+before the existing loop that creates `MediaItem.SubtitleConfiguration` and
+`MediaSource` objects (`VideoPlaybackResolver.java:204-244`).
 
-## 5. Files expected to change
+Consequences:
+
+- ExoPlayer receives only allowed subtitle tracks, so its existing track
+  callbacks naturally build a filtered caption popup.
+- `PlayerTracksController.availableLanguages`, caption-button visibility,
+  and `PlayerMenuController` require no filtering logic of their own.
+- A selection that matches no tracks produces the same state as a video with
+  no captions: the caption button is hidden.
+- The resolver still uses `PlayerHelper.captionLanguageOf()` for display and
+  the existing role flags and renderer selection remain unchanged.
+- Filtering occurs only in `VideoPlaybackResolver`; `StreamInfo` itself is
+  not mutated. Downloads and other consumers continue to see the complete
+  extracted subtitle list.
+
+Do not add this allowlist to `YoutubeStreamExtractor`, `ServiceHelper`, or
+`StreamItemAdapter`. Filtering extraction would unintentionally remove
+subtitle choices from downloads and would conflate translation configuration
+with player presentation.
+
+### 4.5 Preserve saved-caption behavior
+
+Leave `caption_user_set_key` unchanged. If its language is excluded on a
+later video, that track simply is not loaded; ExoPlayer can only select from
+the allowed tracks. Do not delete the saved label, so removing the filter can
+restore the user's earlier choice without migration.
+
+No new automatic selection is introduced. This feature decides which tracks
+are available, not which allowed track the user prefers.
+
+## 5. Expected file changes
 
 | Path | Change |
 | --- | --- |
-| `PipePipeClient/app/src/main/java/org/schabi/newpipe/player/CaptionLanguageFilter.kt` | New pure matching/projection helper. |
-| `PipePipeClient/app/src/main/java/org/schabi/newpipe/player/CaptionSelectionDialog.kt` | New searchable dialog and transient UI state. |
-| `PipePipeClient/app/src/main/java/org/schabi/newpipe/player/PlayerMenuController.kt` | Own full caption list/dialog; extract selection commands; preserve dismissal and preference behavior. |
-| `PipePipeClient/app/src/main/java/org/schabi/newpipe/player/PlayerTracksController.kt` | Supply full labels on every track-state path and keep visibility based on the full list. |
-| `PipePipeClient/app/src/main/java/org/schabi/newpipe/player/PlayerMetadataController.kt` | Reset/dismiss chooser state on a new item if not covered by an existing common reset path. |
-| `PipePipeClient/app/src/main/res/layout/dialog_caption_selection.xml` | New filter/list/empty-state layout. |
-| `PipePipeClient/app/src/main/res/values/strings.xml` | Filter hint and accessibility text. |
-| `PipePipeClient/app/src/test/java/org/schabi/newpipe/player/CaptionLanguageFilterTest.kt` | New JVM unit tests. |
+| `PipePipeClient/app/src/main/res/xml/video_audio_settings.xml` | Add the standard multi-choice Caption languages preference. |
+| `PipePipeClient/app/src/main/res/values/settings_keys.xml` | Add its preference key. |
+| `PipePipeClient/app/src/main/res/values/strings.xml` | Add title, summaries, dialog guidance, and plural/count text as needed. |
+| `PipePipeClient/app/src/main/java/org/schabi/newpipe/settings/VideoAudioSettingsFragment.java` | Generate sorted language entries/values and maintain the summary. |
+| `PipePipeClient/app/src/main/java/org/schabi/newpipe/util/CaptionLanguageFilter.java` | New primary-language matching and subtitle filtering helper. |
+| `PipePipeClient/app/src/main/java/org/schabi/newpipe/player/resolver/VideoPlaybackResolver.java` | Read the setting and filter subtitle streams before source creation. |
+| `PipePipeClient/app/src/test/java/org/schabi/newpipe/util/CaptionLanguageFilterTest.java` | New JVM tests for matching and list behavior. |
 
-`PlayerMetadataController` should be touched only if track callbacks and
-`closeAllPopupMenus()` do not provide a reliable new-item reset; avoid two
-competing reset owners.
+`PlayerMenuController`, `PlayerTracksController`, ExoPlayer layouts, and the
+extractor should not need changes.
 
-## 6. Edge cases and acceptance criteria
+## 6. Acceptance criteria and edge cases
 
-- **Empty query:** every existing row appears once in original order; `No
-  Captions` is also present.
-- **Case and whitespace:** surrounding whitespace is ignored and matching is
-  case-insensitive independent of the device locale, including a Turkish
-  locale test.
-- **Auto-generated captions:** both manual and auto-generated variants remain
-  visible for a language query; their labels are not deduplicated or changed.
-- **No matches:** a clear empty state appears, the language list is empty,
-  and `No Captions` remains usable.
-- **Filtered selection:** selecting a row enables the text renderer, stores
-  the exact same preference value as before, and chooses the same track as
-  selecting that label in the old popup.
-- **No Captions:** disables the text renderer and removes
-  `caption_user_set_key`, exactly as before.
-- **No text tracks:** the caption button is hidden and no stale dialog can be
-  opened or remain visible.
-- **Duplicate labels:** filtering neither merges them nor uses visible-list
-  indices as ExoPlayer track indices. Any pre-existing inability to
-  distinguish identical labels is not expanded into a new selection bug.
-- **Lifecycle:** queue changes, player destruction, fullscreen/popup mode,
-  rotation, backgrounding, and rapid open/close do not leak windows, leave the
-  keyboard visible, retain the previous video's rows, or wedge player controls
-  behind `isSomePopupMenuVisible`.
-- **Preferences:** the search query never changes automatic caption selection,
-  auto-translation settings, or caption choices on later videos.
+- **Fresh install/upgrade:** with no stored selection, every caption appears
+  exactly as before.
+- **One language:** selecting English leaves English manual and
+  auto-generated tracks in the player and removes other languages.
+- **Several languages:** all and only the selected primary languages appear,
+  in their original relative order.
+- **Regional variants:** English includes `en-US`/`en-GB`; Portuguese includes
+  `pt-PT`/`pt-BR`; Chinese script variants match `zh`.
+- **No matching tracks:** the existing player hides its caption button; no
+  blank popup or new keyboard-based empty state is introduced.
+- **Clear selection:** removing every checkbox restores all languages on the
+  next loaded video.
+- **Current playback:** changing the setting does not reload or interrupt an
+  active video; the next resolution uses the new set.
+- **Saved caption:** filtering never rewrites or removes
+  `caption_user_set_key`.
+- **Auto-translation:** extraction still follows its existing advanced
+  settings. An appended translation appears in the player only if its primary
+  language is allowed; it remains available to downloads regardless.
+- **Downloads:** the subtitle spinner continues to show all extracted tracks.
+- **Malformed data:** null/empty subtitle lists and defensive malformed tags
+  do not crash resolution.
+- **Settings UI:** language names are localized and sorted, checkboxes restore
+  their stored values, cancellation makes no changes, and no keyboard appears.
 
 ## 7. Verification plan
 
 ### JVM tests
 
-Add table-driven tests for blank/whitespace queries, case-insensitive partial
-matches, `Locale.ROOT` behavior, no matches, empty input lists, source-order
-preservation, duplicate preservation, auto-generated suffix matching, and
-returning original rather than lowercased labels. Also verify the input list
-is not mutated.
+Cover:
+
+- absent/empty allowlists returning every input stream;
+- one and multiple selected languages;
+- exact, regional, mixed-case, and underscore-normalized tags;
+- nonmatching and malformed tags;
+- original order and object identity;
+- input-list and selected-set immutability; and
+- null/empty source lists.
+
+Add focused tests for any pure summary/name-mapping helper extracted from the
+Settings fragment. Keep Android `Locale` and `Collator` setup deterministic in
+tests by supplying locales explicitly where the helper permits it.
 
 Run the full repository gate because this change adds unit tests:
 
@@ -241,31 +274,33 @@ Run the full repository gate because this change adds unit tests:
 ./scripts/check.sh --full
 ```
 
-### Manual player matrix
+### Manual verification
 
-Use one video with multiple caption languages and, where available, both
-manual and auto-generated tracks:
-
-1. Open the chooser and verify the unfiltered list matches the old popup.
-2. Filter by a partial language name, clear the query, enter a no-match query,
-  and select from a filtered list.
-3. Confirm `No Captions`, saved-caption restoration on a later video, and the
-  caption button's selected/none text.
-4. Toggle auto-translation in advanced settings and confirm it affects stream
-  discovery exactly as before, independently of the transient filter.
-5. Repeat dialog open/filter/select/dismiss in portrait, landscape,
-  fullscreen, and popup playback. Switch queue items and destroy the player
-  while the dialog is open; check controls, system UI, keyboard, and window
-  cleanup.
-6. Confirm the download subtitle spinner is unchanged.
+1. Open **Settings → Video and audio → Caption languages** and confirm the
+   checklist scrolls, sorts, and restores selections without opening a
+   keyboard.
+2. With no selection, play a multi-caption video and compare the popup with
+   current behavior.
+3. Select one language, load the video again, and confirm only its manual and
+   auto-generated tracks remain. Add a second language and repeat.
+4. Test regional tags where available and a selection with no matching track;
+   confirm the caption button hides.
+5. Clear all selections and confirm the complete popup returns on the next
+   loaded video.
+6. Change the setting during active playback and confirm there is no reload;
+   verify the new set takes effect on the next loaded item.
+7. Verify saved-caption selection after clearing the filter, auto-translation
+   interaction, and unchanged download subtitles.
+8. Exercise the Settings checklist with touch, TV/d-pad navigation, large
+   fonts, and a non-English UI locale.
 
 ## 8. Explicit non-goals
 
-- Filtering or grouping the download dialog's subtitles.
-- A persistent allowed-language list or automatic preferred-language choice.
-- Fetching every YouTube translation or changing auto-translated subtitle
-  extraction.
-- Matching BCP-47 codes, localized aliases, accents, or fuzzy spellings.
-- Deduplicating manual/auto-generated tracks or redesigning track selection.
-- Changing caption styling, caption defaults, or `caption_user_set_key`
-  persistence/migration.
+- Search fields, freeform text, or any keyboard UI in ExoPlayer.
+- Replacing or redesigning the existing player caption popup.
+- Filtering downloads or mutating `StreamInfo`'s extracted subtitle list.
+- Changing auto-generated or auto-translated subtitle extraction.
+- Separate regional-variant selections, custom language names, or automatic
+  preferred-caption selection.
+- Immediate reload of an active video when Settings changes.
+- Caption styling, saved-caption migration, or changes to **No Captions**.
