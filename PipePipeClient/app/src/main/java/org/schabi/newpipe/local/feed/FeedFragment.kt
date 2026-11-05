@@ -56,6 +56,7 @@ import com.google.android.material.snackbar.Snackbar
 import com.xwray.groupie.GroupieAdapter
 import com.xwray.groupie.Item
 import com.xwray.groupie.OnAsyncUpdateListener
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -273,6 +274,8 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
         viewLifecycleOwner.lifecycleScope.launch {
             try {
                 viewModel.timerTicks.collect { event -> onScopedTimerTick(event) }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 Log.w(TAG, "timerTicks collect ended", e)
             }
@@ -295,7 +298,7 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
                     val lastProgressAt = viewModel.lastProgressAt
                     val latest = viewModel.latestScopedEvent
                     if (requestedAt != null && lastProgressAt == null) {
-                        val remaining = 10_000 - (now - requestedAt)
+                        val remaining = TIMEOUT_NO_EVENT_MS - (now - requestedAt)
                         if (remaining <= 0) {
                             onRefreshTimeout("timeout10s-rearm-elapsed")
                         } else {
@@ -303,7 +306,7 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
                         }
                     } else if (latest is FeedEventManager.Event.ProgressEvent) {
                         val lastAt = lastProgressAt ?: requestedAt ?: now
-                        val remaining = 60_000 - (now - lastAt)
+                        val remaining = TIMEOUT_NO_PROGRESS_MS - (now - lastAt)
                         if (remaining <= 0) {
                             onRefreshTimeout("timeout60s-rearm-elapsed")
                         } else {
@@ -769,8 +772,8 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
             filteredItems.clear()
             for (item in originalItems) {
                 val stream = item.streamWithState.stream
-                if (stream.title.lowercase().contains(query.lowercase()) ||
-                    stream.uploader.lowercase().contains(query.lowercase()) == true) {
+                if (stream.title.contains(query, ignoreCase = true) ||
+                    stream.uploader.contains(query, ignoreCase = true)) {
                     filteredItems.add(item)
                 }
             }
@@ -801,8 +804,12 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
         }
 
         // Always scroll to top when filter changes
-        feedBinding.itemsList.post {
-            feedBinding.itemsList.layoutManager?.scrollToPosition(0)
+        val itemsList = _feedBinding?.itemsList
+        itemsList?.post {
+            try {
+                itemsList.layoutManager?.scrollToPosition(0)
+            } catch (e: Exception) {
+            }
         }
     }
 
@@ -825,8 +832,12 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
             pushAsync(originalItems, null)
         }
         // Always scroll to top when clearing filter
-        feedBinding.itemsList.post {
-            feedBinding.itemsList.layoutManager?.scrollToPosition(0)
+        val itemsList = _feedBinding?.itemsList
+        itemsList?.post {
+            try {
+                itemsList.layoutManager?.scrollToPosition(0)
+            } catch (e: Exception) {
+            }
         }
     }
 
@@ -1072,9 +1083,13 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
 
         feedBinding.loadingProgressBar.isIndeterminate = isIndeterminate ||
             (progressState.maxProgress > 0 && progressState.currentProgress == 0)
-        feedBinding.loadingProgressBar.progress = progressState.currentProgress
-
-        feedBinding.loadingProgressBar.max = progressState.maxProgress
+        // Never write negatives: setMax(-1) corrupts the bar even when indeterminate.
+        if (progressState.currentProgress >= 0) {
+            feedBinding.loadingProgressBar.progress = progressState.currentProgress
+        }
+        if (progressState.maxProgress >= 0) {
+            feedBinding.loadingProgressBar.max = progressState.maxProgress
+        }
     }
 
     private fun showInfoItemDialog(item: StreamInfoItem) {
@@ -1222,6 +1237,7 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
     }
 
     private fun handleErrorState(errorState: FeedState.ErrorState): Boolean {
+        // Defensive null branch: the VM never posts ErrorState(null) today.
         return if (errorState.error == null) {
             hideLoading()
             false
@@ -1304,6 +1320,7 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
             feedBinding.swipeRefreshLayout.isRefreshing = false
         } catch (e: Exception) {
         }
+        stopRefreshIconSpin()
         Log.d("FeedRefresh", "spinnerClear/" + reason + "@" + SystemClock.elapsedRealtime())
         try {
             updateRefreshViewState()
@@ -1329,6 +1346,7 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
                 // Late arrival after a failure: re-light, dismiss the stuck snackbar,
                 // resume 60 s tracking. Sticky clears on the terminal, not here.
                 isRefreshing = true
+                startRefreshIconSpin()
                 if (isPullToRefreshEnabled) {
                     try {
                         feedBinding.swipeRefreshLayout.isRefreshing = true
@@ -1344,9 +1362,10 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
                 } catch (e: Exception) {
                 }
             }
-            // Full 60 s from the tick ~= the 60_000 - (now - lastProgressAt) formula:
-            // the VM stamps lastProgressAt at the same upstream pass-through.
-            launchTimeout(60_000) { onRefreshTimeout("timeout60s") }
+            // Full 60 s from the tick ~= the remaining-delay formula: the VM stamps
+            // lastProgressAt post-throttle in map(), so a tick runs ~throttle + one
+            // scheduler hop ahead of the stamp.
+            launchTimeout(TIMEOUT_NO_PROGRESS_MS) { onRefreshTimeout("timeout60s") }
         }
         // Terminal ticks: the render path owns the spinner; nothing to arm.
     }
@@ -1661,7 +1680,7 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
             } catch (e: Exception) {
             }
             // Arm the 10 s no-event leg; the first scoped Progress swaps it for 60 s.
-            launchTimeout(10_000) { onRefreshTimeout("timeout10s") }
+            launchTimeout(TIMEOUT_NO_EVENT_MS) { onRefreshTimeout("timeout10s") }
         }
         hideNewItemsLoaded(false)
 
@@ -1676,6 +1695,8 @@ class FeedFragment : BaseStateFragment<FeedState>(), BackPressable {
     companion object {
         const val KEY_GROUP_ID = "ARG_GROUP_ID"
         const val KEY_GROUP_NAME = "ARG_GROUP_NAME"
+        private const val TIMEOUT_NO_EVENT_MS = 10_000L
+        private const val TIMEOUT_NO_PROGRESS_MS = 60_000L
 
         @JvmStatic
         fun newInstance(groupId: Long = FeedGroupEntity.GROUP_ALL_ID, groupName: String? = null): FeedFragment {

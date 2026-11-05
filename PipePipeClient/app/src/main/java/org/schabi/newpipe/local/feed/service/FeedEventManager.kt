@@ -5,25 +5,19 @@ import io.reactivex.rxjava3.core.Flowable
 import io.reactivex.rxjava3.processors.BehaviorProcessor
 import org.schabi.newpipe.database.feed.model.FeedGroupEntity
 import org.schabi.newpipe.local.feed.service.FeedEventManager.Event.IdleEvent
-import java.util.concurrent.atomic.AtomicBoolean
 
 object FeedEventManager {
-    private var processor: BehaviorProcessor<Event> = BehaviorProcessor.create()
-    private var ignoreUpstream = AtomicBoolean()
-    private var eventsFlowable = processor.startWithItem(IdleEvent())
+    // reset()/ignoreUpstream removed: slice 3a replaced the global reset with the
+    // VM-local consumedTerminal, and the old reset self-suppressed its own event.
+    private val processor: BehaviorProcessor<Event> = BehaviorProcessor.create()
+    private val eventsFlowable = processor.startWithItem(IdleEvent())
 
     fun postEvent(event: Event) {
         processor.onNext(event)
     }
 
     fun events(): Flowable<Event> {
-        return eventsFlowable.filter { !ignoreUpstream.get() }
-    }
-
-    fun reset() {
-        ignoreUpstream.set(true)
-        postEvent(IdleEvent())
-        ignoreUpstream.set(false)
+        return eventsFlowable
     }
 
     sealed class Event {

@@ -16,4 +16,8 @@ class FeedResultsHolder {
     fun addErrors(errors: List<Throwable>) {
         itemsErrorsHolder.addAll(errors)
     }
+
+    fun clear() {
+        itemsErrorsHolder.clear()
+    }
 }

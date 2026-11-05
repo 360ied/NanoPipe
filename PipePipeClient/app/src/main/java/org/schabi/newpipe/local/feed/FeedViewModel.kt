@@ -89,7 +89,7 @@ class FeedViewModel(
 
     // Slice 3a push channel: timer-stamp tap emits here pre-throttle for every passing
     // Progress/Success/Error (Idle explicitly exempt). Fragment collection lands in slice 4.
-    private val _timerTicks = MutableSharedFlow<Event>(extraBufferCapacity = 64)
+    private val _timerTicks = MutableSharedFlow<Event>(extraBufferCapacity = 256)
     val timerTicks: SharedFlow<Event> = _timerTicks
 
     // Local terminal replacement (slice 3a): the consumed terminal instance. Later recombines
@@ -108,6 +108,13 @@ class FeedViewModel(
         refreshRequestedAt = now
         seenNonProcessingProgress = false
         failedSticky = false
+        // Fresh load owns fresh terminal/timer state: stale progress markers would
+        // defeat the slice-4 rotation re-arm, and a stale celebration would leak
+        // into the next load. consumedTerminal is instance-compared, so it needs
+        // no reset (a new load posts new instances).
+        lastProgressAt = null
+        latestScopedEvent = null
+        pendingCelebration = false
     }
 
     /** Slice 4 failure entry for the 10 s / 60 s timer trips, which have no event. */
@@ -120,14 +127,16 @@ class FeedViewModel(
         latestScopedEvent = event
         if (event is ProgressEvent) lastProgressAt = now
         if (event is ErrorResultEvent) failedSticky = true
-        if (event is SuccessResultEvent && !event.cancelled) failedSticky = false
+        // Any terminal clears the sticky — including cancelled ones: cancel is user
+        // intent to stop, not a failure, and the fragment renders LoadedState.
+        if (event is SuccessResultEvent) failedSticky = false
     }
 
     private fun errorSetKey(errors: List<Throwable>): Set<String> = errors.map { e ->
         if (e is FeedLoadService.RequestException) {
-            "${e.subscriptionId}|${e.cause?.let { it::class.qualifiedName } ?: "null"}"
+            "${e.subscriptionId}|${e.cause?.let { it::class.qualifiedName } ?: "null"}|${e.cause?.message}"
         } else {
-            "raw|${e::class.qualifiedName}"
+            "raw|${e::class.qualifiedName}|${e.message}"
         }
     }.toSet()
 
@@ -137,18 +146,22 @@ class FeedViewModel(
                 .filter { passesIndicator(it) }
                 .doOnNext { e ->
                     // Timer-stamp tap: narrower predicate (indicator + non-Idle), pre-throttle.
-                    if (e !is IdleEvent) _timerTicks.tryEmit(e)
+                    if (e !is IdleEvent) {
+                        if (!_timerTicks.tryEmit(e)) {
+                            Log.w(TAG, "timerTicks dropped a tick; 60 s window may trip early")
+                        }
+                    }
                 },
             toggleShowPlayedItemsFlowable,
             feedDatabaseManager.notLoadedCount(groupId)
                 .onErrorResumeNext { e: Throwable ->
-                    Log.e(TAG, "notLoadedCount stream died, parking tab", e)
-                    Flowable.never()
+                    Log.e(TAG, "notLoadedCount stream died, using sentinel", e)
+                    Flowable.just(0L)
                 },
             feedDatabaseManager.oldestSubscriptionUpdate(groupId)
                 .onErrorResumeNext { e: Throwable ->
-                    Log.e(TAG, "oldestSubscriptionUpdate stream died, parking tab", e)
-                    Flowable.never()
+                    Log.e(TAG, "oldestSubscriptionUpdate stream died, using sentinel", e)
+                    Flowable.just(emptyList())
                 },
 
             Function4 { t1: FeedEventManager.Event, t2: Boolean,
@@ -162,7 +175,7 @@ class FeedViewModel(
         .map { (event, showPlayedItems, notLoadedCount, oldestUpdate) ->
             onScopedEvent(event)
             val effectiveEvent = if ((event is SuccessResultEvent || event is ErrorResultEvent) &&
-                event == consumedTerminal
+                event === consumedTerminal
             ) {
                 IdleEvent()
             } else {

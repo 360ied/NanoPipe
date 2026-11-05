@@ -84,6 +84,10 @@ class FeedLoadService : Service() {
         }
 
         if (intent == null || (loadingDisposable != null && loadingDisposable?.isDisposed == false)) {
+            // Single-flight drop is group-agnostic: a second tab's request is ignored
+            // while any load runs. Its fragment still arms its own 10 s timer, which
+            // trips into retry UI instead of hanging — acceptable degradation
+            // (retry re-fires once the flight clears), not a silent success.
             return START_NOT_STICKY
         }
 
@@ -121,6 +125,11 @@ class FeedLoadService : Service() {
         disposeAll()
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
         stopSelf()
+    }
+
+    override fun onDestroy() {
+        disposeAll()
+        super.onDestroy()
     }
 
     override fun onBind(intent: Intent): IBinder? {

@@ -75,6 +75,9 @@ class FeedLoadManager(private val context: Context) {
         // Without this, a Cancel followed by a re-tap into the same live service instance
         // poisons the next load (takeWhile is immediately false). Slice 3a.
         cancelSignal.set(false)
+        // Fresh holder per load: sequential loads on this reused manager must not
+        // carry prior errors into the next SuccessResultEvent.
+        feedResultsHolder.clear()
         val defaultSharedPreferences = PreferenceManager.getDefaultSharedPreferences(context)
         val useFeedExtractor = defaultSharedPreferences.getBoolean(
             context.getString(R.string.feed_use_dedicated_fetch_method_key),
@@ -138,6 +141,14 @@ class FeedLoadManager(private val context: Context) {
 
                 Flowable.just(subscriptionEntity)
                     .delay(wait, TimeUnit.MILLISECONDS)
+                    // Prompt cancel: delay() is not interruptible, so race the wait
+                    // against a cooperative poll — a cancel during a long
+                    // service-throttle wait completes this rail immediately instead
+                    // of letting the action appear dead.
+                    .takeUntil(
+                        Flowable.interval(50L, 50L, TimeUnit.MILLISECONDS)
+                            .filter { cancelSignal.get() }
+                    )
                     .map {
                         lastFetchTimePerService[serviceId] = System.currentTimeMillis()
                         it
