@@ -4,8 +4,8 @@ How the What's New (`FeedFragment`) refresh path works today, why a
 refresh blanks the video list, and a proposed redesign that splits
 initial load from refresh so the list stays visible and interactive.
 
-- Status: proposal / draft, not implemented (rev. 2, 2026-11-05:
-  addresses pedantic review pass 1 — see §9).
+- Status: proposal / draft, not implemented (rev. 3, 2026-11-05:
+  addresses pedantic review passes 1–2 — see §9).
 - Scope: `PipePipeClient/app/src/main/java/org/schabi/newpipe/local/feed/`
   (`FeedFragment.kt`, `FeedViewModel.kt`, `FeedState.kt`,
   `FeedDatabaseManager.kt`, `service/FeedEventManager.kt`,
@@ -85,8 +85,11 @@ End to end, a refresh does this:
    `hideLoading()` (or `showEmptyState()` when empty). `ErrorState` with
    a non-null error calls `showError()` → full error panel (which also
    hides the list via `handleError()`).
-6. While `isRefreshing == true`, `listenerStreamItem` drops all clicks
-   and long-presses (`FeedFragment.kt:797,819`).
+6. While `isRefreshing == true`, `listenerStreamItem` drops all
+   non-selection clicks and all long-presses: selection-mode clicks
+   bypass the gate (`FeedFragment.kt:793-794` toggles and returns before
+   the `!isRefreshing` check at `:797`), while long-press has no bypass
+   (`:819`).
 
 Per-subscription (non-fatal) errors avoid the wipe only when they are
 surfaced at all: `LoadedState.itemsErrors` goes to `handleItemsErrors()`
@@ -94,6 +97,9 @@ surfaced at all: `LoadedState.itemsErrors` goes to `handleItemsErrors()`
 `oldestSubscriptionUpdate` having *changed* since the last `LoadedState`
 (`FeedFragment.kt:871-875`), so a refresh whose failures leave the
 oldest timestamp untouched reports success with zero user feedback.
+Conversely, when both timestamps are null (no subscriptions / fresh DB)
+the gate's second arm fires on *every* `LoadedState`, replaying errors
+rather than gating them.
 
 ### 2.1 Defects / quirks the redesign should fix
 
@@ -171,15 +177,17 @@ substituting `arrayListOf()`.
   the id to each posted event; the receiver side (the `combineLatest` in
   `FeedViewModel.kt:44-55`) ignores events whose id matches neither its
   own `groupId` nor `GROUP_ALL_ID` semantics (an all-subscriptions load
-  refreshes every tab's contents). Without this, background loads and
+  refreshes every tab's contents). Events tagged
+  `GROUP_NOTIFICATION_ENABLED` (`-2`, the `NotificationWorker` path)
+  match no tab and are ignored by all fragment view-models. Without this, background loads and
   other tabs' refreshes light up this tab's indicator.
-- Replace stuck-terminal-event semantics: after consuming a terminal
-  event, the `ViewModel` replaces it locally with `IdleEvent` (or the
-  event source posts a filter-passing scoped idle) so later DB/toggle
-  recombines render plain `LoadedState` instead of replaying stale
-  `itemsErrors` or resurrecting `ErrorState`. Do not rely on
-  `FeedEventManager.reset()` — its emission is self-suppressed (see §2
-  step 4).
+- Replace stuck-terminal-event semantics (decision: local replacement,
+  no `FeedEventManager` protocol change): after consuming a terminal
+  event, the `ViewModel` substitutes `IdleEvent` for the stored event and
+  the `reset()` call is removed — its emission is self-suppressed anyway
+  (see §2 step 4). Later DB/toggle recombines then render plain
+  `LoadedState` instead of replaying stale `itemsErrors` or resurrecting
+  `ErrorState`.
 - No-op refresh: suppress the hide/show round-trip when the load had no
   outdated subscriptions. Normative gate: treat a load as contentless
   when the only progress seen is `current == -1 && max == -1 &&
@@ -194,11 +202,15 @@ substituting `arrayListOf()`.
   `swipeRefreshLayout.isRefreshing = true`, and route determinate
   progress into the existing header. Normative header rules during
   refresh-with-content (see 4.4 for the views):
-  - `refresh_subtitle_text` shows `Refreshing %1$d/%2$d` (new string
-    resource) whenever `max > 0`; indeterminate phases
-    (`current == -1`) show the `progressMessage` text instead.
-  - When `notLoadedCount > 0` simultaneously applies, append
-    ` · Not loaded: %d` to the same line rather than replacing it.
+  - `refresh_subtitle_text` shows `Refreshing %1$d/%2$d` (new
+    `feed_refreshing_progress` string) whenever `max > 0`; indeterminate
+    phases (`current == -1`) show the `progressMessage` text instead.
+    `refresh_text` (the oldest-update line) is unchanged during refresh.
+  - When `notLoadedCount > 0` simultaneously applies, the subtitle is
+    the refreshing text plus the existing `Not loaded: %d` line joined
+    by a new `feed_refreshing_with_not_loaded` format (`%1$s · %2$s`),
+    so translators own the separator. Combined lines may ellipsize at
+    `maxLines=1` — acceptable, determinate counts stay short.
   - On settle (`LoadedState`/`ErrorState`), the subtitle reverts to the
     `notLoadedCount`-or-gone rule and `updateRefreshViewState()`.
 - Remove the `!isRefreshing` gates in `listenerStreamItem` with no
@@ -206,16 +218,20 @@ substituting `arrayListOf()`.
   immutable snapshots.
 - Fatal errors: if the adapter is non-empty, do not call `showError()`
   (panel). Instead snackbar the error and leave the stale list + a
-  header retry (`refreshRootView` click already calls
-  `reloadContent()`). Keep the panel for the empty-adapter case.
+  header retry: override `handleError()`'s hiding of `refreshRootView`
+  so the header stays visible with subtitle `Refresh failed — tap to
+  retry` (new string resource; tapping calls `reloadContent()` as
+  today). Keep the panel for the empty-adapter case.
 - `handleLoadedState` stays the diff/update path; keep
   `selection.retainOnly(…)`, `updateRefreshViewState()`,
   `playlist_control` visibility, and `highlightNewItemsAfter()` — which
   becomes *more* correct once the list is no longer wiped underneath
-  it. Additionally: re-apply the active search query after rebuilding
-  `originalItems` (completion currently pushes the unfiltered list and
-  orphans the query text in the action bar,
-  `FeedFragment.kt:842-852`). And surface `itemsErrors` whenever the
+  it. Additionally: after rebuilding `originalItems`, call
+  `filterItems(editText?.text.orEmpty())` instead of pushing the
+  unfiltered list (completion currently orphans the query text in the
+  action bar, `FeedFragment.kt:842-852`). `filterItems` restores
+  `isFilterEnabled` semantics and scrolls to top;
+  `selection.retainOnly(…)` keeps applying before the filter as today. And surface `itemsErrors` whenever the
   error set changes, dropping the `oldestUpdate`-changed gate that
   silently swallows failures today.
 - `reloadContent()`: keep firing the service + `hideNewItemsLoaded`;
@@ -224,7 +240,12 @@ substituting `arrayListOf()`.
   swipe spinner and snackbar with retry (covers the single-flight drop,
   §2 step 2). Once any `ProgressEvent` has arrived, spinner lifetime is
   bound to the terminal event instead — slow many-subscription loads
-  must never time out.
+  must never time out. Bounded instead by a terminal timeout: if no
+  terminal event arrives within 60 s of the last `ProgressEvent`, treat
+  the load as failed — clear the spinner, snackbar, keep the stale
+  list. 60 s is safe because active loads emit per-channel progress far
+  more often (6-way parallel); only a dead service or lost terminal
+  trips it.
 
 ### 4.4 Layout (`fragment_feed.xml`)
 
@@ -247,19 +268,18 @@ stall progress between counts).
   arriving via the §4.3 10 s rule, and ignores other groups' terminal
   events via §4.2 scoping.
 - Rotation mid-refresh: `listState` save/restore already exists; with
-  the list kept visible there is no restore jump. Wire `isLoading` in
-  `BaseStateFragment` into the new states — it is currently dead in the
-  feed path (only written by `startLoading()`, which the feed never
-  calls): set it in `handleProgressState`/`hideLoading` so a recreated
-  fragment can re-derive the header indicator, or delete it from this
-  design if a `ViewModel`-scoped `isRefreshing` flag covers recreation
-  via the `BehaviorProcessor` replay (it does — the new `ViewModel`
-  re-emits from the latest event on subscribe; state this choice
-  explicitly in implementation).
+  the list kept visible there is no restore jump. Decision: set `isLoading`
+  in `handleProgressState` / `hideLoading` / `showEmptyState` /
+  `handleError` (it is currently dead in the feed path — only written by
+  `startLoading()`, which the feed never calls) so a recreated fragment
+  re-derives the header indicator; the fragment-scoped `ViewModel`
+  replaying the latest event covers the data.
 - Cancel (`cancelSignal` from the notification action) currently flows
   into `postProcessFeed()` and is reported as `Success` (partial).
-  Decide in implementation: post a distinct terminal event or nothing —
-  do not present cancelled loads as successful.
+  Decision: `SuccessResultEvent` gains `cancelled: Boolean = false`;
+  the fragment skips the new-items celebration
+  (`highlightNewItemsAfter` + pill) when true. Cancelled loads stay
+  visible as loads but are never presented as successful refreshes.
 - Show-played toggle must stay service-independent (re-query DB, no
   `ProgressEvent` when idle, as today); with §4.2 it additionally stays
   non-blanking mid-refresh because progress now carries rows.
@@ -284,10 +304,11 @@ stall progress between counts).
 2. Header progress (B): route progress counts into
    `refresh_subtitle_text` per §4.3 rules + icon spin per §4.4.
 3. State split (C core): `RefreshingState`, ViewModel always queries
-   DB, group-scoped events, terminal-event replacement, error-gate
+   DB, group-scoped events (incl. `-2` ignore), local terminal-event
+   replacement + `reset()` removal, `cancelled` flag, error-gate
    removal, filter re-apply on `LoadedState`.
-4. Polish: 10 s no-event spinner rule, thin header progress bar,
-   rotation re-attach choice, cancel terminal event.
+4. Polish: spinner rules (10 s no-event + 60 s terminal), thin header
+   progress bar, `isLoading` wiring, header strings.
 
 ## 7. Test plan (manual)
 
@@ -299,8 +320,9 @@ stall progress between counts).
 - Refresh with 0 subscriptions → empty state, no spinner hang.
 - Per-channel failure (airplane mode, terminated channel) with content
   → list kept, per-channel dialog/snackbar as today; with empty adapter
-  → error panel. (These paths are non-fatal by design; they exercise
-  the `itemsErrors` gate removal, not the fatal-error path.)
+  → empty state + per-channel dialog/snackbar. (These paths are
+  non-fatal by design; they exercise the `itemsErrors` gate removal,
+  not the fatal-error path.)
 - Fatal pipeline failure with content → snackbar, stale list kept,
   header retry works; with empty adapter → error panel. (Hard to hit
   manually — DB/transaction failure; verify by inspection if needed.)
@@ -314,15 +336,18 @@ stall progress between counts).
   re-applied to new rows.
 - Notification-triggered background load while fragment visible →
   no spurious indicator on unrelated tabs.
-- Second refresh tapped while one is in flight → no stuck spinner
-  (10 s rule) and eventual settle on the first load's terminal event.
+- Same-group refresh re-tapped while one is in flight → settles on the
+  first load's terminal event (events arrived, so the 10 s rule is
+  moot). Cross-group re-tap → the other group's terminal is ignored per
+  §4.2 and the 10 s timer applies to the new request.
+- Service killed mid-refresh → 60 s terminal timeout clears the spinner
+  with snackbar + retry; stale list kept.
 
 ## 8. Open questions
 
-- Header copy: is `Refreshing 12/48` the right string, or should
-  per-channel names appear (the service notification already shows
-  `updateDescription`)? Per-channel text churns fast at 6-way
-  parallelism — `x/y` recommended, confirm.
+- Header copy: `Refreshing 12/48` + `· Not loaded: n` composition
+  decided (§4.3); remaining is translator review of the new format
+  strings, not the shape. Per-channel names stay notification-only.
 - Throttle interplay: `throttleLatest` on the combined flow can delay
   the final `LoadedState` behind a trailing `ProgressEvent` — verify the
   spinner clears promptly on fast refreshes.
@@ -344,3 +369,10 @@ stall progress between counts).
   processing post and the `itemsErrors` gate; made header composition,
   spinner timeout, group-scoping locus, and rotation re-attach
   normative; corrected toggle/filter test expectations.
+- Rev. 3 (2026-11-05): addresses pedantic review pass 2 —
+  selection-bypass gate wording; null–null gate arm; `-2` scoping rule;
+  60 s terminal timeout; fatal-with-content header visibility and retry
+  string; same-group vs cross-group re-tap settle rules; local
+  terminal-replacement decision with `reset()` removal; `cancelled`
+  flag decision; `filterItems` call-site and header string/truncation
+  specifics; `isLoading` wiring decision.
