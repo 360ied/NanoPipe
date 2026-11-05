@@ -209,7 +209,7 @@
     <!-- Caption Size -->
     <string name="caption_settings_key">caption_settings_key</string>
     <string name="caption_user_set_key">caption_user_set_key</string>
-    <string name="caption_language_filter_key">caption_language_filter</string>
+    <string name="caption_language_filter_key">caption_language_filter_key</string>
 
     <!-- Content & History -->
     <string name="show_channel_tabs_key">channel_tabs</string>

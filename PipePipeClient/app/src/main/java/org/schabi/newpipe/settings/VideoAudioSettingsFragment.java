@@ -128,8 +128,8 @@ public class VideoAudioSettingsFragment extends BasePreferenceFragment {
      * this only affects settings display.
      */
     private void normalizePersistedCaptionLanguages() {
-        final SharedPreferences prefs =
-                getPreferenceManager().getSharedPreferences();
+        final SharedPreferences prefs = PreferenceManager
+                .getDefaultSharedPreferences(requireContext());
         final String key = getString(R.string.caption_language_filter_key);
         final Set<String> stored = prefs.getStringSet(key, null);
         final Set<String> normalized =
@@ -149,8 +149,9 @@ public class VideoAudioSettingsFragment extends BasePreferenceFragment {
             return;
         }
         final Set<String> selected = CaptionLanguageFilter.normalizeSelection(
-                getPreferenceManager().getSharedPreferences().getStringSet(
-                        getString(R.string.caption_language_filter_key), null));
+                PreferenceManager.getDefaultSharedPreferences(requireContext())
+                        .getStringSet(
+                                getString(R.string.caption_language_filter_key), null));
         if (selected.isEmpty()) {
             preference.setSummary(R.string.caption_language_filter_all);
             return;
@@ -277,14 +278,14 @@ public class VideoAudioSettingsFragment extends BasePreferenceFragment {
         buildCaptionLanguageMaps();
         normalizePersistedCaptionLanguages();
         updateCaptionLanguageFilterSummary();
-        getPreferenceManager().getSharedPreferences()
+        PreferenceManager.getDefaultSharedPreferences(requireContext())
                 .registerOnSharedPreferenceChangeListener(listener);
     }
 
     @Override
     public void onPause() {
         super.onPause();
-        getPreferenceManager().getSharedPreferences()
+        PreferenceManager.getDefaultSharedPreferences(requireContext())
                 .unregisterOnSharedPreferenceChangeListener(listener);
     }
 

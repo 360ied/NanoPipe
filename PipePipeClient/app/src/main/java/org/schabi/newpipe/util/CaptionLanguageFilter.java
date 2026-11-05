@@ -82,8 +82,9 @@ public final class CaptionLanguageFilter {
      * because it names no language and can never be selected.
      * Returns an empty string for null, blank, undetermined, or
      * empty-primary tags. Other primaries (including numeric strings such as
-     * {@code "123"}) are returned lowercased; the vocabulary filter and
-     * selection normalization exclude values that name no selectable language.</p>
+     * {@code "123"}) are returned lowercased; {@link #normalizeSelection} keeps
+     * such unknown codes for forward compatibility and only
+     * {@link #buildVocabulary} enforces the selectable-code filter.</p>
      */
     @NonNull
     public static String canonicalPrimaryCode(@Nullable final String tag) {
@@ -139,9 +140,11 @@ public final class CaptionLanguageFilter {
      * An empty selection allows everything.
      *
      * @param normalizedSelection selection previously passed through
-     *                              {@link #normalizeSelection}; raw stored sets
-     *                              must be normalized first or non-canonical
-     *                              codes will never match
+     *                              {@link #normalizeSelection}; raw sets are
+     *                              defensively re-normalized, so already-canonical
+     *                              sets pass through unchanged while raw codes
+     *                              (e.g. {@code "EN-US"}) converge to the effective
+     *                              filter
      */
     public static boolean isTagAllowed(@NonNull final Set<String> normalizedSelection,
                                       @Nullable final String tag) {
@@ -181,7 +184,13 @@ public final class CaptionLanguageFilter {
             return result;
         }
         for (final SubtitlesStream stream : subtitles) {
-            if (stream != null && isTagAllowed(normalized, stream.getLanguageTag())) {
+            if (stream == null) {
+                continue;
+            }
+            // Inlined isTagAllowed against the already-normalized set:
+            // no per-item copy for large subtitle lists.
+            final String primary = canonicalPrimaryCode(stream.getLanguageTag());
+            if (!primary.isEmpty() && normalized.contains(primary)) {
                 result.add(stream);
             }
         }
@@ -295,7 +304,10 @@ public final class CaptionLanguageFilter {
         if (normalizedSelected == null) {
             return names;
         }
-        for (final String code : normalizedSelected) {
+        // Defensively re-normalize like isTagAllowed/sortSelectedFirst so raw
+        // codes converge instead of falling back to uppercase.
+        final Set<String> effective = normalizeSelection(normalizedSelected);
+        for (final String code : effective) {
             if (code == null) {
                 continue;
             }
@@ -341,9 +353,9 @@ public final class CaptionLanguageFilter {
      * rows on toggle (order recomputes on open and on query change).
      *
      * @param normalizedSelected selection previously passed through
-     *                             {@link #normalizeSelection}; raw stored sets
-     *                             must be normalized first or non-canonical
-     *                             codes will never match
+     *                             {@link #normalizeSelection}; raw sets are
+     *                             defensively re-normalized, so already-canonical
+     *                             sets pass through unchanged
      */
     @NonNull
     public static List<LanguageEntry> sortSelectedFirst(

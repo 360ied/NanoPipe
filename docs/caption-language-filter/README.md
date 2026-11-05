@@ -13,8 +13,9 @@ or ExoPlayer UI; keyboard interaction is confined to the Settings dialog.
   `MultiSelectListPreference` (see §2). The stock multi-choice dialog rendered
   zero rows for runtime-populated entries on-device despite a healthy
   239-item adapter (verified via adapter count); root cause unidentified.
-- Audited: 2026-11-04, `main` at `2ac2f21` (revalidate references before
-  implementation).
+- Audited: 2026-11-04, `main` at `2ac2f21`; implementation re-verified in
+  review round 2 (2026-11-05). Follow-up: identify the stock
+  `MultiSelectListPreference` root cause.
 - Scope: **Settings → Video and audio** and `StreamInfo` side-loaded subtitle
   sources created by `VideoPlaybackResolver`.
 - Default: no languages selected means **show all**, preserving current

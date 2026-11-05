@@ -104,6 +104,10 @@ public class CaptionLanguageFilterTest {
         assertEquals("", CaptionLanguageFilter.primaryCodeOf(new Locale("und")));
         assertEquals("en", CaptionLanguageFilter.primaryCodeOf(Locale.ENGLISH));
         assertEquals("he", CaptionLanguageFilter.primaryCodeOf(new Locale("iw")));
+        // Folded through canonicalPrimaryCode so the assertion holds regardless of
+        // how the platform maps the legacy code.
+        assertEquals("he", CaptionLanguageFilter.canonicalPrimaryCode(
+                CaptionLanguageFilter.primaryCodeOf(new Locale("iw"))));
         assertEquals("en", CaptionLanguageFilter.primaryCodeOf(new Locale("en", "US")));
     }
 

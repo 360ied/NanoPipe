@@ -1,6 +1,8 @@
 package org.schabi.newpipe.settings;
 
 import android.app.Dialog;
+import android.content.Context;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Parcelable;
 import android.text.Editable;
@@ -9,6 +11,7 @@ import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.inputmethod.EditorInfo;
+import android.view.inputmethod.InputMethodManager;
 import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.EditText;
@@ -70,8 +73,8 @@ public class CaptionLanguageSelectionDialog extends DialogFragment {
                 workingSet.addAll(restored);
             }
         } else {
-            // getDefaultSharedPreferences() resolves to the same store as
-            // VideoAudioSettingsFragment's getPreferenceManager().getSharedPreferences().
+            // Single store: both the dialog and VideoAudioSettingsFragment use
+            // PreferenceManager.getDefaultSharedPreferences().
             workingSet.addAll(CaptionLanguageFilter.normalizeSelection(
                     PreferenceManager.getDefaultSharedPreferences(requireContext())
                             .getStringSet(getString(R.string.caption_language_filter_key),
@@ -83,9 +86,7 @@ public class CaptionLanguageSelectionDialog extends DialogFragment {
         setupButtons(view);
         if (savedInstanceState != null) {
             searchField.setText(savedInstanceState.getString(STATE_QUERY, ""));
-            @SuppressWarnings("deprecation")
-            final Parcelable scrollState =
-                    savedInstanceState.getParcelable(STATE_SCROLL);
+            final Parcelable scrollState = getSavedScrollState(savedInstanceState);
             if (scrollState != null) {
                 languageList.post(() -> {
                     if (languageList.getLayoutManager() != null) {
@@ -101,6 +102,25 @@ public class CaptionLanguageSelectionDialog extends DialogFragment {
                 .setTitle(R.string.caption_language_filter_title)
                 .setView(view)
                 .create();
+    }
+
+    @Nullable
+    private static Parcelable getSavedScrollState(
+            @NonNull final Bundle savedInstanceState) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            return savedInstanceState.getParcelable(STATE_SCROLL, Parcelable.class);
+        }
+        @SuppressWarnings("deprecation")
+        final Parcelable legacy = savedInstanceState.getParcelable(STATE_SCROLL);
+        return legacy;
+    }
+
+    @Override
+    public void onDestroyView() {
+        searchField = null;
+        languageList = null;
+        adapter = null;
+        super.onDestroyView();
     }
 
     @Override
@@ -148,7 +168,13 @@ public class CaptionLanguageSelectionDialog extends DialogFragment {
         });
         searchField.setOnEditorActionListener((v, actionId, event) -> {
             if (actionId == EditorInfo.IME_ACTION_DONE) {
+                final InputMethodManager imm = (InputMethodManager) v.getContext()
+                        .getSystemService(Context.INPUT_METHOD_SERVICE);
+                if (imm != null) {
+                    imm.hideSoftInputFromWindow(v.getWindowToken(), 0);
+                }
                 searchField.clearFocus();
+                return true;
             }
             return false;
         });
@@ -192,6 +218,10 @@ public class CaptionLanguageSelectionDialog extends DialogFragment {
             visibleEntries = updated;
             visibleSelected = updatedSelected;
             diff.dispatchUpdatesTo(this);
+        }
+
+        void noteSelectionChanged() {
+            visibleSelected = new HashSet<>(workingSet);
         }
 
         @Nullable
@@ -317,6 +347,7 @@ public class CaptionLanguageSelectionDialog extends DialogFragment {
             } else {
                 workingSet.add(entry.code);
             }
+            adapter.noteSelectionChanged();
             adapter.notifyItemChanged(position);
         }
     }
