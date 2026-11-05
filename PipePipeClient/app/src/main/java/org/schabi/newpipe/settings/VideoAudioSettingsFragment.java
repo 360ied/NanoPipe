@@ -11,7 +11,6 @@ import android.widget.Toast;
 
 import androidx.annotation.Nullable;
 import androidx.appcompat.app.AlertDialog;
-import androidx.preference.MultiSelectListPreference;
 import androidx.preference.Preference;
 import androidx.preference.PreferenceManager;
 
@@ -60,13 +59,8 @@ public class VideoAudioSettingsFragment extends BasePreferenceFragment {
                 return;
             }
             if (s.equals(getString(R.string.caption_language_filter_key))) {
-                final Preference changed = findPreference(s);
-                if (changed instanceof MultiSelectListPreference) {
-                    final MultiSelectListPreference filterPreference =
-                            (MultiSelectListPreference) changed;
-                    normalizePersistedCaptionLanguages(filterPreference);
-                    updateCaptionLanguageFilterSummary(filterPreference);
-                }
+                normalizePersistedCaptionLanguages();
+                updateCaptionLanguageFilterSummary();
             }
             if (s.equals(getString(R.string.minimize_on_exit_key))) {
                 final String newSetting = sharedPreferences.getString(s, null);
@@ -96,64 +90,53 @@ public class VideoAudioSettingsFragment extends BasePreferenceFragment {
     }
 
     /**
-     * Populate the caption-language checklist vocabulary once and refresh its
-     * summary. No stored selection (empty set) means all languages.
+     * Build the caption-language vocabulary once and refresh the summary.
+     * The checklist itself lives in {@link CaptionLanguageSelectionDialog}.
+     * No stored selection (empty set) means all languages.
      */
     private void setupCaptionLanguageFilter() {
-        final Preference preference =
-                requirePreference(R.string.caption_language_filter_key);
-        if (!(preference instanceof MultiSelectListPreference)) {
-            throw new IllegalStateException("Preference '"
-                    + getString(R.string.caption_language_filter_key)
-                    + "' must be a MultiSelectListPreference");
-        }
-        final MultiSelectListPreference filterPreference =
-                (MultiSelectListPreference) preference;
+        requirePreference(R.string.caption_language_filter_key);
         captionLanguageVocabulary = CaptionLanguageFilter.buildVocabulary(
                 Locale.getDefault(),
                 Arrays.asList(Locale.getAvailableLocales()));
         captionLanguageCodeToName =
                 CaptionLanguageFilter.nameMap(captionLanguageVocabulary);
-        final CharSequence[] entries =
-                new CharSequence[captionLanguageVocabulary.size()];
-        final CharSequence[] entryValues =
-                new CharSequence[captionLanguageVocabulary.size()];
-        for (int i = 0; i < captionLanguageVocabulary.size(); i++) {
-            final LanguageEntry entry = captionLanguageVocabulary.get(i);
-            entries[i] = entry.name;
-            entryValues[i] = entry.code;
-        }
-        filterPreference.setEntries(entries);
-        filterPreference.setEntryValues(entryValues);
-        normalizePersistedCaptionLanguages(filterPreference);
-        updateCaptionLanguageFilterSummary(filterPreference);
+        normalizePersistedCaptionLanguages();
+        updateCaptionLanguageFilterSummary();
     }
 
     /**
-     * Canonicalize the stored set (e.g. restored from a backup) so dialog
-     * checkboxes and the summary reflect the effective filter. Unknown codes
-     * are kept: the summary falls back to uppercase and they clear on the
-     * next dialog confirm. Playback normalizes independently, so this only
-     * affects settings display.
+     * Canonicalize the stored set (e.g. restored from a backup) so the dialog
+     * and the summary reflect the effective filter. Unknown codes are kept:
+     * the summary falls back to uppercase and they clear on the next dialog
+     * confirm. Playback normalizes independently, so this only affects
+     * settings display.
      */
-    private void normalizePersistedCaptionLanguages(
-            final MultiSelectListPreference filterPreference) {
-        final Set<String> stored = filterPreference.getValues();
+    private void normalizePersistedCaptionLanguages() {
+        final SharedPreferences prefs =
+                getPreferenceManager().getSharedPreferences();
+        final String key = getString(R.string.caption_language_filter_key);
+        final Set<String> stored = prefs.getStringSet(key, null);
         final Set<String> normalized =
                 CaptionLanguageFilter.normalizeSelection(stored);
-        if (!normalized.equals(stored)) {
-            filterPreference.setValues(normalized);
+        if (stored == null || !normalized.equals(stored)) {
+            prefs.edit().putStringSet(key, normalized).apply();
         }
     }
 
-    private void updateCaptionLanguageFilterSummary(
-            final MultiSelectListPreference preference) {
+    private void updateCaptionLanguageFilterSummary() {
         if (!isAdded() || captionLanguageVocabulary == null
                 || captionLanguageCodeToName == null) {
             return;
         }
+        final Preference preference =
+                findPreference(getString(R.string.caption_language_filter_key));
+        if (preference == null) {
+            return;
+        }
         final Set<String> selected = CaptionLanguageFilter.normalizeSelection(
-                preference.getValues());
+                getPreferenceManager().getSharedPreferences().getStringSet(
+                        getString(R.string.caption_language_filter_key), null));
         if (selected.isEmpty()) {
             preference.setSummary(R.string.caption_language_filter_all);
             return;
@@ -253,6 +236,11 @@ public class VideoAudioSettingsFragment extends BasePreferenceFragment {
 
     @Override
     public boolean onPreferenceTreeClick(final Preference preference) {
+        if (getString(R.string.caption_language_filter_key).equals(preference.getKey())) {
+            new CaptionLanguageSelectionDialog().show(
+                    getParentFragmentManager(), "caption_language_filter");
+            return true;
+        }
         if (getString(R.string.caption_settings_key).equals(preference.getKey())) {
             try {
                 startActivity(new Intent(Settings.ACTION_CAPTIONING_SETTINGS));
@@ -268,14 +256,8 @@ public class VideoAudioSettingsFragment extends BasePreferenceFragment {
     public void onResume() {
         super.onResume();
         // Normalize before registering so a dirty write cannot self-notify.
-        final Preference preference =
-                findPreference(getString(R.string.caption_language_filter_key));
-        if (preference instanceof MultiSelectListPreference) {
-            final MultiSelectListPreference filterPreference =
-                    (MultiSelectListPreference) preference;
-            normalizePersistedCaptionLanguages(filterPreference);
-            updateCaptionLanguageFilterSummary(filterPreference);
-        }
+        normalizePersistedCaptionLanguages();
+        updateCaptionLanguageFilterSummary();
         getPreferenceManager().getSharedPreferences()
                 .registerOnSharedPreferenceChangeListener(listener);
     }

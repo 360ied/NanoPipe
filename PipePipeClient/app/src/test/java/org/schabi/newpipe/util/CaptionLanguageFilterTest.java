@@ -275,6 +275,66 @@ public class CaptionLanguageFilterTest {
     }
 
     @Test
+    public void filterEntriesByQueryMatchesNamesAndCodes() {
+        final List<LanguageEntry> vocabulary = CaptionLanguageFilter.buildVocabulary(
+                Locale.ENGLISH, Arrays.asList(Locale.ENGLISH, Locale.GERMAN,
+                        Locale.FRENCH, new Locale("pt")));
+        assertEquals(vocabulary.size(), CaptionLanguageFilter
+                .filterEntriesByQuery(vocabulary, null).size());
+        assertEquals(vocabulary.size(), CaptionLanguageFilter
+                .filterEntriesByQuery(vocabulary, "   ").size());
+        final List<LanguageEntry> english =
+                CaptionLanguageFilter.filterEntriesByQuery(vocabulary, "eng");
+        assertTrue(english.stream().anyMatch(e -> e.code.equals("en")));
+        assertTrue(english.stream().noneMatch(e -> e.code.equals("fr")));
+        final List<LanguageEntry> upper =
+                CaptionLanguageFilter.filterEntriesByQuery(vocabulary, "GER");
+        assertTrue(upper.stream().anyMatch(e -> e.code.equals("de")));
+        final List<LanguageEntry> byCode =
+                CaptionLanguageFilter.filterEntriesByQuery(vocabulary, "pt");
+        assertTrue(byCode.stream().anyMatch(e -> e.code.equals("pt")));
+        assertTrue(CaptionLanguageFilter
+                .filterEntriesByQuery(vocabulary, "zzz-no-match").isEmpty());
+    }
+
+    @Test
+    public void sortSelectedFirstIsStable() {
+        final List<LanguageEntry> vocabulary = CaptionLanguageFilter.buildVocabulary(
+                Locale.ENGLISH, Arrays.asList(Locale.ENGLISH, Locale.GERMAN,
+                        Locale.FRENCH));
+        final List<LanguageEntry> sorted = CaptionLanguageFilter.sortSelectedFirst(
+                vocabulary, new HashSet<>(Arrays.asList("de", "fr")));
+        // Selected codes surface first in vocabulary order, rest unchanged.
+        final List<String> vocabCodes = codesOf(vocabulary);
+        final List<String> expected = new ArrayList<>();
+        for (final String code : vocabCodes) {
+            if (code.equals("de") || code.equals("fr")) {
+                expected.add(code);
+            }
+        }
+        for (final String code : vocabCodes) {
+            if (!code.equals("de") && !code.equals("fr")) {
+                expected.add(code);
+            }
+        }
+        assertEquals(expected, codesOf(sorted));
+        // Null or empty selection keeps the original order.
+        assertEquals(codesOf(vocabulary), codesOf(
+                CaptionLanguageFilter.sortSelectedFirst(vocabulary, null)));
+        assertEquals(codesOf(vocabulary), codesOf(
+                CaptionLanguageFilter.sortSelectedFirst(vocabulary,
+                        Collections.emptySet())));
+    }
+
+    private static List<String> codesOf(final List<LanguageEntry> entries) {
+        final List<String> codes = new ArrayList<>(entries.size());
+        for (final LanguageEntry entry : entries) {
+            codes.add(entry.code);
+        }
+        return codes;
+    }
+
+    @Test
     public void nameMapIsUnmodifiable() {
         final Map<String, String> map = CaptionLanguageFilter.nameMap(
                 CaptionLanguageFilter.buildVocabulary(

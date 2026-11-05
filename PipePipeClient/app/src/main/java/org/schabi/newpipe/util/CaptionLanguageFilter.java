@@ -278,6 +278,60 @@ public final class CaptionLanguageFilter {
     }
 
     /**
+     * Filter vocabulary entries by a user-typed query, matching localized
+     * display names or canonical codes case-insensitively. A null or blank
+     * query returns every entry in order.
+     */
+    @NonNull
+    public static List<LanguageEntry> filterEntriesByQuery(
+            @NonNull final List<LanguageEntry> vocabulary,
+            @Nullable final String query) {
+        Objects.requireNonNull(vocabulary);
+        final String needle =
+                query == null ? "" : query.trim().toLowerCase(Locale.ROOT);
+        final List<LanguageEntry> result = new ArrayList<>(vocabulary.size());
+        for (final LanguageEntry entry : vocabulary) {
+            if (entry == null) {
+                continue;
+            }
+            if (needle.isEmpty()
+                    || entry.name.toLowerCase(Locale.ROOT).contains(needle)
+                    || entry.code.contains(needle)) {
+                result.add(entry);
+            }
+        }
+        return result;
+    }
+
+    /**
+     * Stable selected-first ordering: selected entries keep their relative
+     * order first, followed by the rest in their relative order. Used so a
+     * reopened checklist surfaces the current selection without reshuffling
+     * rows while the user is interacting with them.
+     */
+    @NonNull
+    public static List<LanguageEntry> sortSelectedFirst(
+            @NonNull final List<LanguageEntry> entries,
+            @Nullable final Set<String> normalizedSelected) {
+        Objects.requireNonNull(entries);
+        final List<LanguageEntry> result = new ArrayList<>(entries.size());
+        final List<LanguageEntry> rest = new ArrayList<>(entries.size());
+        for (final LanguageEntry entry : entries) {
+            if (entry == null) {
+                continue;
+            }
+            if (normalizedSelected != null
+                    && normalizedSelected.contains(entry.code)) {
+                result.add(entry);
+            } else {
+                rest.add(entry);
+            }
+        }
+        result.addAll(rest);
+        return result;
+    }
+
+    /**
      * Code-to-name lookup for a vocabulary, for summary rendering.
      */
     @NonNull
