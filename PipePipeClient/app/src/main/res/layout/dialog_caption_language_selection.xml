@@ -20,7 +20,8 @@
             android:inputType="text"
             android:imeOptions="actionSearch"
             android:ellipsize="end"
-            android:singleLine="true"
+            android:maxLines="1"
+            android:autofillHints="none"
             android:layout_marginBottom="8dp" />
 
     <androidx.recyclerview.widget.RecyclerView
@@ -29,6 +30,15 @@
             android:layout_height="0dp"
             android:layout_weight="1"
             android:maxHeight="300dp" />
+
+    <TextView
+            android:id="@+id/caption_language_empty"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/caption_language_filter_no_match"
+            android:textSize="14sp"
+            android:padding="12dp"
+            android:visibility="gone" />
 
     <LinearLayout
             android:layout_width="match_parent"
@@ -43,7 +53,7 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:text="@android:string/cancel"
-                android:layout_marginRight="8dp" />
+                android:layout_marginEnd="8dp" />
 
         <Button
                 android:id="@+id/save_button"

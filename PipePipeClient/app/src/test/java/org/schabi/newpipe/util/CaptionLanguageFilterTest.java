@@ -335,6 +335,41 @@ public class CaptionLanguageFilterTest {
     }
 
     @Test
+    public void filterByQueryTrimsAndIgnoresCase() {
+        final List<LanguageEntry> entries = Arrays.asList(
+                new LanguageEntry("en", "English"),
+                new LanguageEntry("de", "German"));
+        assertEquals(Collections.singletonList("en"),
+                codesOf(CaptionLanguageFilter.filterEntriesByQuery(entries, " eng ")));
+        assertEquals(Collections.singletonList("de"),
+                codesOf(CaptionLanguageFilter.filterEntriesByQuery(entries, "DE")));
+        assertEquals(Collections.singletonList("en"),
+                codesOf(CaptionLanguageFilter.filterEntriesByQuery(entries, "EN")));
+    }
+
+    @Test
+    public void filterByQuerySkipsNullsAndPreservesOrderWithoutMutating() {
+        final List<LanguageEntry> entries = new ArrayList<>(Arrays.asList(
+                new LanguageEntry("en", "English"), null,
+                new LanguageEntry("de", "German")));
+        final List<LanguageEntry> result =
+                CaptionLanguageFilter.filterEntriesByQuery(entries, null);
+        assertEquals(Arrays.asList("en", "de"), codesOf(result));
+        assertNotSame(entries, result);
+        assertEquals(3, entries.size());
+    }
+
+    @Test
+    public void sortSelectedFirstIgnoresUnknownCodes() {
+        final List<LanguageEntry> entries = Arrays.asList(
+                new LanguageEntry("en", "English"),
+                new LanguageEntry("de", "German"));
+        assertEquals(Arrays.asList("de", "en"), codesOf(
+                CaptionLanguageFilter.sortSelectedFirst(
+                        entries, new HashSet<>(Arrays.asList("xx", "de")))));
+    }
+
+    @Test
     public void nameMapIsUnmodifiable() {
         final Map<String, String> map = CaptionLanguageFilter.nameMap(
                 CaptionLanguageFilter.buildVocabulary(

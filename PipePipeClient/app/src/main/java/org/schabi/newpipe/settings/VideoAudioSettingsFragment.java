@@ -40,6 +40,9 @@ public class VideoAudioSettingsFragment extends BasePreferenceFragment {
     private static final int IDX_VP9 = 0;
     private static final int IDX_AV1 = 1;
 
+    /** Dialog tag for the caption-language checklist; guards double-show. */
+    private static final String CAPTION_LANGUAGE_DIALOG_TAG = "caption_language_filter";
+
     /** Maximum selected languages listed by name before the summary collapses to a count. */
     private static final int MAX_NAMES_IN_SUMMARY = 3;
 
@@ -96,21 +99,27 @@ public class VideoAudioSettingsFragment extends BasePreferenceFragment {
      */
     private void setupCaptionLanguageFilter() {
         requirePreference(R.string.caption_language_filter_key);
+        buildCaptionLanguageMaps();
+        normalizePersistedCaptionLanguages();
+        updateCaptionLanguageFilterSummary();
+    }
+
+    private void buildCaptionLanguageMaps() {
+        // Rebuilt (not cached across resumes) so an in-app locale change
+        // cannot leave dialog and summary names disagreeing.
         captionLanguageVocabulary = CaptionLanguageFilter.buildVocabulary(
                 Locale.getDefault(),
                 Arrays.asList(Locale.getAvailableLocales()));
         captionLanguageCodeToName =
                 CaptionLanguageFilter.nameMap(captionLanguageVocabulary);
-        normalizePersistedCaptionLanguages();
-        updateCaptionLanguageFilterSummary();
     }
 
     /**
      * Canonicalize the stored set (e.g. restored from a backup) so the dialog
-     * and the summary reflect the effective filter. Unknown codes are kept:
-     * the summary falls back to uppercase and they clear on the next dialog
-     * confirm. Playback normalizes independently, so this only affects
-     * settings display.
+     * and the summary reflect the effective filter. Unknown codes are kept
+     * and preserved across dialog confirms (they are invisible there): the
+     * summary falls back to uppercase. Playback normalizes independently, so
+     * this only affects settings display.
      */
     private void normalizePersistedCaptionLanguages() {
         final SharedPreferences prefs =
@@ -237,8 +246,11 @@ public class VideoAudioSettingsFragment extends BasePreferenceFragment {
     @Override
     public boolean onPreferenceTreeClick(final Preference preference) {
         if (getString(R.string.caption_language_filter_key).equals(preference.getKey())) {
-            new CaptionLanguageSelectionDialog().show(
-                    getParentFragmentManager(), "caption_language_filter");
+            if (getParentFragmentManager().findFragmentByTag(
+                    CAPTION_LANGUAGE_DIALOG_TAG) == null) {
+                new CaptionLanguageSelectionDialog().show(
+                        getParentFragmentManager(), CAPTION_LANGUAGE_DIALOG_TAG);
+            }
             return true;
         }
         if (getString(R.string.caption_settings_key).equals(preference.getKey())) {
@@ -256,6 +268,7 @@ public class VideoAudioSettingsFragment extends BasePreferenceFragment {
     public void onResume() {
         super.onResume();
         // Normalize before registering so a dirty write cannot self-notify.
+        buildCaptionLanguageMaps();
         normalizePersistedCaptionLanguages();
         updateCaptionLanguageFilterSummary();
         getPreferenceManager().getSharedPreferences()

@@ -279,8 +279,10 @@ public final class CaptionLanguageFilter {
 
     /**
      * Filter vocabulary entries by a user-typed query, matching localized
-     * display names or canonical codes case-insensitively. A null or blank
-     * query returns every entry in order.
+     * display names or canonical codes as a raw case-insensitive substring
+     * (the query is not canonicalized, so a regional query never matches a
+     * primary code). A null or ASCII-blank query returns every entry in
+     * order.
      */
     @NonNull
     public static List<LanguageEntry> filterEntriesByQuery(
@@ -307,7 +309,12 @@ public final class CaptionLanguageFilter {
      * Stable selected-first ordering: selected entries keep their relative
      * order first, followed by the rest in their relative order. Used so a
      * reopened checklist surfaces the current selection without reshuffling
-     * rows while the user is interacting with them.
+     * rows on toggle (order recomputes on open and on query change).
+     *
+     * @param normalizedSelected selection previously passed through
+     *                             {@link #normalizeSelection}; raw stored sets
+     *                             must be normalized first or non-canonical
+     *                             codes will never match
      */
     @NonNull
     public static List<LanguageEntry> sortSelectedFirst(
@@ -340,7 +347,9 @@ public final class CaptionLanguageFilter {
         Objects.requireNonNull(vocabulary);
         final Map<String, String> map = new HashMap<>(vocabulary.size() + 1);
         for (final LanguageEntry entry : vocabulary) {
-            map.put(entry.code, entry.name);
+            if (entry != null) {
+                map.put(entry.code, entry.name);
+            }
         }
         return Collections.unmodifiableMap(map);
     }
