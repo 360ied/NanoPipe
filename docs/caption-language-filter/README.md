@@ -7,6 +7,11 @@ Live and manifest-embedded captions are explicitly outside this feature's
 scope. No search field, freeform text, or keyboard input is added to ExoPlayer.
 
 - Status: **proposed; not implemented**.
+- Implemented in branch `feat/caption-language-filter` with one deliberate
+  deviation: a searchable custom dialog replaces the specified
+  `MultiSelectListPreference` (see §2). The stock multi-choice dialog rendered
+  zero rows for runtime-populated entries on-device despite a healthy
+  239-item adapter (verified via adapter count); root cause unidentified.
 - Audited: 2026-11-04, `main` at `2ac2f21` (revalidate references before
   implementation).
 - Scope: **Settings → Video and audio** and `StreamInfo` side-loaded subtitle
@@ -48,15 +53,21 @@ Add **Caption languages** to **Settings → Video and audio**, immediately next
 to the existing Captions preference that opens Android's caption-style
 settings.
 
-Tapping it opens the AndroidX `MultiSelectListPreference` dialog:
+Tapping it opens a searchable checklist dialog (`CaptionLanguageSelectionDialog`):
 
-- Each row is a language name with a checkbox.
-- There is no text field and therefore no keyboard interaction.
-- Users can select one language or several languages.
+- A guidance header explains the empty-means-all rule and the
+  media-source-resolution timing.
+- A search field filters the list by localized name or code as the user types;
+  keyboard interaction is confined to Settings (the ExoPlayer no-keyboard rule
+  is unchanged).
+- Each row is a language name with a checkbox. Users can select one language
+  or several languages.
+- Selected languages float to the top of the list whenever the dialog is
+  opened or the query changes, so a saved selection is easy to review and
+  deselect. Toggling a checkbox never reshuffles rows mid-interaction.
+- **OK** saves the normalized selection; **Cancel** discards all changes made
+  since opening.
 - Selecting no languages means **All languages**, not **No captions**.
-- The dialog explains: selected languages are shown for supported subtitles;
-  select none to show all; changes apply when playback next resolves or
-  reloads a video's media source, not to already-loaded or preloaded items.
 - The preference summary shows **All languages** when empty. Otherwise it
   shows the selected names, collapsing to a count when too many are selected
   for a concise summary.
@@ -144,9 +155,14 @@ language semantics.
 
 ### 4.1 Add the Settings preference
 
-Add a `MultiSelectListPreference` to
+Add a plain `Preference` row for **Caption languages** to
 `PipePipeClient/app/src/main/res/xml/video_audio_settings.xml` near the
-existing Captions preference.
+existing Captions preference. Tapping it opens `CaptionLanguageSelectionDialog`
+(a `DialogFragment` with its own RecyclerView checklist, defined in
+`dialog_caption_language_selection.xml` with rows from
+`item_caption_language_selection.xml`), so no stock multi-choice dialog is
+used. Runtime entries are built by the dialog itself; no XML language arrays
+are required.
 
 Add resources for:
 
@@ -160,24 +176,30 @@ No XML language arrays are required because entries and values are generated
 at runtime. An absent, null, or empty stored set all mean no filtering. No
 migration or preferences-version bump is needed.
 
-### 4.2 Populate and summarize the checklist
+### 4.2 Populate, summarize, and persist the checklist
 
 In `VideoAudioSettingsFragment`:
 
-1. Build the sorted language-name/canonical-code pairs once when preferences
-   are created, deduplicate aliases, and assign them to the preference's
-   entries and entry values. Verify that the two- and three-letter vocabulary
-   includes `yue`, `ceb`, and `haw`.
-2. Render the summary from the stored set and the same name/code mapping.
-3. Extend the existing preference-change listener to refresh that summary
-   when `caption_language_filter_key` changes.
-4. Refresh the summary on resume as well, following the fragment's
-   register-on-resume pattern.
+1. Build the sorted language-name/canonical-code mapping once when preferences
+   are created, for summary rendering only. The dialog builds its own copy.
+   Verify that the two- and three-letter vocabulary includes `yue`, `ceb`,
+   and `haw`.
+2. Render the summary from the stored set and the same name/code mapping:
+   **All languages** when empty, up to three names otherwise, and a localized
+   `N languages selected` summary beyond that limit.
+3. Normalize the stored set on setup, on resume, and on every change to the
+   key, so externally written values converge to the effective filter.
+4. Open `CaptionLanguageSelectionDialog` on row tap; refresh the summary when
+   the stored set changes.
 
-Use a short list of selected names for a small selection and a localized
-`N languages selected` summary beyond that limit. Do not add a custom
-preference dialog; the standard multi-choice UI already supplies checkboxes,
-scrolling, accessibility, TV navigation, and cancellation.
+In `CaptionLanguageSelectionDialog`:
+
+1. Rebuild the vocabulary on open and seed a working copy from the stored set.
+2. Order the visible list selected-first (stable within each group) on open
+   and on every query change; never reorder on toggle.
+3. Filter rows with the pure `filterEntriesByQuery` helper as the user types.
+4. Persist the normalized working copy only on save; cancel discards it.
+   The fragment's change listener then refreshes the summary.
 
 ### 4.3 Add a small language-filter helper
 
@@ -253,11 +275,14 @@ are available, not which allowed track the user prefers.
 
 | Path | Change |
 | --- | --- |
-| `PipePipeClient/app/src/main/res/xml/video_audio_settings.xml` | Add the standard multi-choice Caption languages preference. |
+| `PipePipeClient/app/src/main/res/xml/video_audio_settings.xml` | Add the Caption languages preference row (plain `Preference`; the dialog is custom). |
 | `PipePipeClient/app/src/main/res/values/settings_keys.xml` | Add its preference key. |
 | `PipePipeClient/app/src/main/res/values/strings.xml` | Add title, summaries, dialog guidance, and plural/count text as needed. |
-| `PipePipeClient/app/src/main/java/org/schabi/newpipe/settings/VideoAudioSettingsFragment.java` | Generate sorted language entries/values and maintain the summary. |
-| `PipePipeClient/app/src/main/java/org/schabi/newpipe/util/CaptionLanguageFilter.java` | New primary-language matching and subtitle filtering helper. |
+| `PipePipeClient/app/src/main/java/org/schabi/newpipe/settings/VideoAudioSettingsFragment.java` | Build the vocabulary mapping for summaries, normalize the stored set, and open the dialog on tap. |
+| `PipePipeClient/app/src/main/java/org/schabi/newpipe/settings/CaptionLanguageSelectionDialog.java` | New searchable checklist dialog with working-copy semantics. |
+| `PipePipeClient/app/src/main/res/layout/dialog_caption_language_selection.xml` | New dialog layout (guidance, search, list, buttons). |
+| `PipePipeClient/app/src/main/res/layout/item_caption_language_selection.xml` | New checkbox row layout. |
+| `PipePipeClient/app/src/main/java/org/schabi/newpipe/util/CaptionLanguageFilter.java` | New primary-language matching, query filtering, selected-first ordering, and subtitle filtering helper. |
 | `PipePipeClient/app/src/main/java/org/schabi/newpipe/player/resolver/VideoPlaybackResolver.java` | Read the setting and filter subtitle streams before source creation. |
 | `PipePipeClient/app/src/test/java/org/schabi/newpipe/util/CaptionLanguageFilterTest.java` | New JVM tests for matching and list behavior. |
 
@@ -295,8 +320,10 @@ extractor should not need changes.
 - **Downloads:** the subtitle spinner continues to show all extracted tracks.
 - **Malformed data:** null/empty subtitle lists and defensive malformed tags
   do not crash resolution.
-- **Settings UI:** language names are localized and sorted, checkboxes restore
-  their stored values, cancellation makes no changes, and no keyboard appears.
+- **Settings UI:** search filters by name or code; reopening the dialog
+  floats the saved selection to the top without reshuffling on toggle;
+  cancelling discards all changes; saving persists the normalized set and
+  refreshes the summary.
 
 ## 7. Verification plan
 
@@ -331,14 +358,15 @@ Run the full repository gate because this change adds unit tests:
 ### Manual verification
 
 1. Open **Settings → Video and audio → Caption languages** and confirm the
-   checklist scrolls, sorts, and restores selections without opening a
-   keyboard.
+   guidance header, search field, and scrollable checklist. Type a query and
+   confirm the list filters by name or code; clear it to restore the full list.
 2. With no selection, play a multi-caption video with side-loaded subtitles
    and compare the popup with current behavior.
-3. Select one language, force the media source to resolve again, and confirm
-   only its manual and auto-generated side-loaded tracks remain. Add a second
-   language and repeat. Do not treat merely selecting a cached queue item as
-   a forced resolution.
+3. Select one language, save, reopen the dialog, and confirm the selection
+   floats to the top. Toggle a checkbox and confirm rows do not reshuffle.
+   Force the media source to resolve again, and confirm only its manual and
+   auto-generated side-loaded tracks remain. Add a second language and repeat.
+   Do not treat merely selecting a cached queue item as a forced resolution.
 4. Test regional and three-letter tags, legacy/modern aliases, and a selection
    with no matching side-loaded track; confirm the caption button hides when
    no other manifest tracks exist.
