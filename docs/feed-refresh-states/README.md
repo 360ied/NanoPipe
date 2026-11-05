@@ -4,8 +4,8 @@ How the What's New (`FeedFragment`) refresh path works today, why a
 refresh blanks the video list, and a proposed redesign that splits
 initial load from refresh so the list stays visible and interactive.
 
-- Status: proposal / draft, not implemented (rev. 3, 2026-11-05:
-  addresses pedantic review passes 1–2 — see §9).
+- Status: proposal / draft, not implemented (rev. 4, 2026-11-05:
+  addresses pedantic review passes 1–3 — see §9).
 - Scope: `PipePipeClient/app/src/main/java/org/schabi/newpipe/local/feed/`
   (`FeedFragment.kt`, `FeedViewModel.kt`, `FeedState.kt`,
   `FeedDatabaseManager.kt`, `service/FeedEventManager.kt`,
@@ -87,7 +87,7 @@ End to end, a refresh does this:
    hides the list via `handleError()`).
 6. While `isRefreshing == true`, `listenerStreamItem` drops all
    non-selection clicks and all long-presses: selection-mode clicks
-   bypass the gate (`FeedFragment.kt:793-794` toggles and returns before
+   bypass the gate (`FeedFragment.kt:795-796` toggles and returns before
    the `!isRefreshing` check at `:797`), while long-press has no bypass
    (`:819`).
 
@@ -226,12 +226,16 @@ substituting `arrayListOf()`.
   `selection.retainOnly(…)`, `updateRefreshViewState()`,
   `playlist_control` visibility, and `highlightNewItemsAfter()` — which
   becomes *more* correct once the list is no longer wiped underneath
-  it. Additionally: after rebuilding `originalItems`, call
-  `filterItems(editText?.text.orEmpty())` instead of pushing the
-  unfiltered list (completion currently orphans the query text in the
-  action bar, `FeedFragment.kt:842-852`). `filterItems` restores
-  `isFilterEnabled` semantics and scrolls to top;
-  `selection.retainOnly(…)` keeps applying before the filter as today. And surface `itemsErrors` whenever the
+  it. Additionally: after rebuilding `originalItems`, if the search query
+  (`editText?.text`) is non-empty, rebuild `filteredItems` from it and
+  push the *filtered* list via `groupAdapter.updateAsync` with the same
+  `highlightNewItemsAfter` completion callback as the unfiltered push
+  (completion currently orphans the query text in the action bar,
+  `FeedFragment.kt:842-854`). Do not call `filterItems` here — it
+  unconditionally scrolls to top (`:663`), which would override the
+  `listState` restore. When the query is empty, keep the existing
+  unfiltered push untouched. `selection.retainOnly(…)` keeps applying
+  before either push as today. And surface `itemsErrors` whenever the
   error set changes, dropping the `oldestUpdate`-changed gate that
   silently swallows failures today.
 - `reloadContent()`: keep firing the service + `hideNewItemsLoaded`;
@@ -332,8 +336,8 @@ stall progress between counts).
   loads.
 - Group tabs: refresh group B while viewing group A → A shows nothing.
 - Toggle "show played items" mid-refresh → instant, no blanking.
-- Search filter active across refresh completion → query preserved and
-  re-applied to new rows.
+- Search filter active across refresh completion: query preserved and
+  re-applied to new rows, with no scroll jump.
 - Notification-triggered background load while fragment visible →
   no spurious indicator on unrelated tabs.
 - Same-group refresh re-tapped while one is in flight → settles on the
@@ -376,3 +380,7 @@ stall progress between counts).
   terminal-replacement decision with `reset()` removal; `cancelled`
   flag decision; `filterItems` call-site and header string/truncation
   specifics; `isLoading` wiring decision.
+- Rev. 4 (2026-11-05): addresses pedantic review pass 3 — filter
+  re-apply gated on non-empty query with highlight callback preserved
+  (no `filterItems` scroll-jump); selection-bypass cite; `isLoading`
+  rationale; cross-group timer non-interference.
