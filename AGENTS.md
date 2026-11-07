@@ -69,10 +69,9 @@ Always use the Gradle wrapper (`./gradlew`); never a system `gradle`.
 other automation runs these gates; enforcement is manual — running
 `./scripts/check.sh` before completing a code task is the gate.
 - **Pre-Completion Check**: Run `./scripts/check.sh` inside the dedicated worktree before completing any code task. Passing verification signifies that the branch is ready for user review — it does NOT trigger or authorize merging into `main`. Standalone documentation-only changes (committed on `main`) are exempt from `./scripts/check.sh`.
-- **Fast Gate** (default): Python unit tests for `scripts/` plus `assembleDebug` + `lintDebug` (`-DskipFormatKtlint`) in `PipePipeClient/`:
-  `nix develop --command ./gradlew assembleDebug lintDebug --stacktrace -DskipFormatKtlint` (run from `PipePipeClient/` inside the worktree).
-- **Quick Loop** (`./scripts/check.sh --quick`, iteration only): Python unit tests plus `assembleDebug` (single universal APK) with no lint. Use freely while iterating; always run the default Fast Gate once before completing a task.
-- **Full Gate** (`./scripts/check.sh --full`): Fast gate plus JVM unit tests (`testDebugUnitTest` in `PipePipeClient/`).
+- **Gate**: Python unit tests for `scripts/` plus `assembleDebug` and `testDebugUnitTest` (`-DskipFormatKtlint`) in `PipePipeClient/`:
+  `nix develop --command ./gradlew assembleDebug testDebugUnitTest --stacktrace -DskipFormatKtlint` (run from `PipePipeClient/` inside the worktree).
+- **No lint in the gate (by design)**: lint reports hundreds of open findings and enforces nothing (`abortOnError false`), so gating on it buys only minutes. The `lint {}` block in `app/build.gradle` stays solely to keep lint out of release builds.
 
 ## Versioning
 

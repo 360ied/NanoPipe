@@ -142,6 +142,8 @@ android {
         }
     }
 
+    // Lint is intentionally ungated (see AGENTS.md Verification): this block
+    // exists only to keep lint from ever breaking release builds.
     lint {
         checkReleaseBuilds false
         abortOnError false

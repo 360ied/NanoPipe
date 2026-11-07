@@ -9,16 +9,8 @@
 #
 set -eo pipefail
 
-FULL_TEST=false
-QUICK=false
-for arg in "$@"; do
-  if [ "$arg" == "--full" ]; then
-    FULL_TEST=true
-  fi
-  if [ "$arg" == "--quick" ]; then
-    QUICK=true
-  fi
-done
+# No flags: there is a single gate (assemble + unit tests). Old --quick/--full
+# invocations are accepted and ignored so muscle memory keeps working.
 
 echo "========================================"
 echo " 1. Checking Git Branch"
@@ -50,17 +42,8 @@ echo "========================================"
 # The Gradle wrapper lives in PipePipeClient/ (the extractor has its own
 # separate Gradle build that check.sh does not cover). `nix develop` finds
 # the flake by walking up to the worktree root, so run it from PipePipeClient/.
-if [ "$FULL_TEST" = true ]; then
-  echo "Running full verification (assemble + lint + unit tests)..."
-  (cd PipePipeClient && nix develop --command ./gradlew assembleDebug lintDebug testDebugUnitTest --stacktrace -DskipFormatKtlint)
-elif [ "$QUICK" = true ]; then
-  echo "Running quick verification (assemble only, no lint)..."
-  echo "For iteration only; run the default gate before completing a task."
-  (cd PipePipeClient && nix develop --command ./gradlew assembleDebug --stacktrace -DskipFormatKtlint)
-else
-  echo "Running fast verification (assemble + lint)..."
-  (cd PipePipeClient && nix develop --command ./gradlew assembleDebug lintDebug --stacktrace -DskipFormatKtlint)
-fi
+echo "Running verification (assemble + unit tests)..."
+(cd PipePipeClient && nix develop --command ./gradlew assembleDebug testDebugUnitTest --stacktrace -DskipFormatKtlint)
 
 echo ""
 echo "========================================"
