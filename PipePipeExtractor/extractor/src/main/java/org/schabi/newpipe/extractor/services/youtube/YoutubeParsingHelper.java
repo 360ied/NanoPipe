@@ -62,6 +62,7 @@ import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeParseException;
 import java.util.*;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -208,6 +209,8 @@ YoutubeParsingHelper {
             {"INNERTUBE_CONTEXT_CLIENT_VERSION\":\"([0-9\\.]+?)\"",
                     "innertube_context_client_version\":\"([0-9\\.]+?)\"",
                     "client.version=([0-9\\.]+)"};
+    private static final String[] SW_JS_DATA_CLIENT_VERSION_REGEXES =
+            {"\"([0-9]\\.[0-9]{8}\\.[0-9]{2}\\.[0-9]{2})\""};
     private static final String[] INITIAL_DATA_REGEXES =
             {"window\\[\"ytInitialData\"\\]\\s*=\\s*(\\{.*?\\});",
                     "var\\s*ytInitialData\\s*=\\s*(\\{.*?\\});"};
@@ -580,7 +583,8 @@ YoutubeParsingHelper {
                 .end().done().getBytes(StandardCharsets.UTF_8);
         // @formatter:on
 
-        final Map<String, List<String>> headers = getClientHeaders(WEB_CLIENT_ID, WEB_HARDCODED_CLIENT_VERSION);
+        final Map<String, List<String>> headers = new HashMap<>(
+                getClientHeaders(WEB_CLIENT_ID, WEB_HARDCODED_CLIENT_VERSION));
         headers.put("Content-Type", singletonList("application/json"));
 
         // This endpoint is fetched by the YouTube website to get the items of its main menu and is
@@ -602,15 +606,16 @@ YoutubeParsingHelper {
         if (clientVersionExtracted) {
             return;
         }
-        final String url = "https://www.youtube.com/sw.js";
+        // sw.js is an empty stub without a consent cookie, sw.js_data still has the version
+        final String url = "https://www.youtube.com/sw.js_data";
         final Map<String, List<String>> headers = getOriginReferrerHeaders("https://www.youtube.com");
         final String response = getDownloader().get(url, headers).responseBody();
         try {
             clientVersion = getStringResultFromRegexArray(response,
-                    INNERTUBE_CONTEXT_CLIENT_VERSION_REGEXES, 1);
+                    SW_JS_DATA_CLIENT_VERSION_REGEXES, 1);
         } catch (final Parser.RegexException e) {
             throw new ParsingException("Could not extract YouTube WEB InnerTube client version "
-                    + "from sw.js", e);
+                    + "from sw.js_data", e);
         }
         clientVersionExtracted = true;
     }
@@ -700,8 +705,17 @@ YoutubeParsingHelper {
         // fingerprinting based on the client version used
         try {
             extractClientVersionFromSwJs();
-        } catch (final Exception e) {
-            extractClientVersionFromHtmlSearchResultsPage();
+        } catch (final Exception swJsException) {
+            try {
+                extractClientVersionFromHtmlSearchResultsPage();
+            } catch (final Exception htmlException) {
+                // e.g. a redirect loop ("Too many follow-up requests") on the search page must
+                // not prevent falling back to the hardcoded client version below
+                htmlException.addSuppressed(swJsException);
+                if (!isHardcodedClientVersionValid()) {
+                    throw htmlException;
+                }
+            }
         }
 
         if (clientVersionExtracted) {
@@ -1224,11 +1238,60 @@ YoutubeParsingHelper {
         final String responseContentType = response.getHeader("Content-Type");
         if (responseContentType != null
                 && responseContentType.toLowerCase().contains("text/html")) {
-            throw new ParsingException("Got HTML document, expected JSON response"
-                    + " (latest url was: \"" + response.latestUrl() + "\")");
+            throw new ParsingException("Got HTML document, expected JSON response "
+                    + describeHtmlResponse(response));
         }
 
         return responseBody;
+    }
+
+    @Nullable
+    private static String stripQuery(@Nullable final String url) {
+        return url == null ? null : url.split("\\?", 2)[0];
+    }
+
+    private static final Pattern IPV4_PATTERN = Pattern.compile("\\b\\d{1,3}(\\.\\d{1,3}){3}\\b");
+    private static final Pattern IPV6_PATTERN = Pattern.compile(
+            "\\b(?=[0-9a-fA-F:]*(::|[a-fA-F]))[0-9a-fA-F]{1,4}(:[0-9a-fA-F]{0,4}){2,7}\\b");
+    private static final Pattern FORM_ACTION_PATTERN = Pattern.compile(
+            "<form[^>]*action=\"([^\"?]*)", Pattern.CASE_INSENSITIVE);
+
+    /**
+     * Summarizes an unexpected HTML answer (usually a Google block page) for error reports.
+     * Addresses and query strings are left out because block pages print the user's IP.
+     */
+    private static String describeHtmlResponse(@Nonnull final Response response) {
+        final String body = response.responseBody();
+        final String lowerBody = body.toLowerCase();
+        final Matcher title = Pattern.compile("<title>([^<]*)</title>",
+                Pattern.CASE_INSENSITIVE).matcher(body);
+        final Matcher formAction = FORM_ACTION_PATTERN.matcher(body);
+        String text = body.replaceAll("(?is)<(script|style)[^>]*>.*?</\\1>", " ")
+                .replaceAll("<[^>]+>", " ").replaceAll("&nbsp;|\\s+", " ").trim();
+        text = IPV6_PATTERN.matcher(IPV4_PATTERN.matcher(text).replaceAll("<ip>"))
+                .replaceAll("<ip>").replaceAll("\\?\\S*", "");
+        final List<String> cookieNames = new ArrayList<>();
+        for (final Map.Entry<String, List<String>> header
+                : response.responseHeaders().entrySet()) {
+            if ("Set-Cookie".equalsIgnoreCase(header.getKey())) {
+                for (final String cookie : header.getValue()) {
+                    cookieNames.add(cookie.split("=", 2)[0]);
+                }
+            }
+        }
+        return "(latest url: \"" + stripQuery(response.latestUrl())
+                + "\", code: " + response.responseCode() + " " + response.responseMessage()
+                + ", net: " + response.getHeader("X-PipePipe-Net")
+                + ", server: " + response.getHeader("Server")
+                + ", retry-after: " + response.getHeader("Retry-After")
+                + ", location: " + stripQuery(response.getHeader("Location"))
+                + ", set-cookie: " + cookieNames
+                + ", length: " + body.length()
+                + ", title: \"" + (title.find() ? title.group(1).trim() : "") + "\""
+                + ", recaptcha: " + lowerBody.contains("recaptcha")
+                + ", captcha: " + lowerBody.contains("captcha")
+                + ", form: " + (formAction.find() ? "\"" + formAction.group(1) + "\"" : "none")
+                + ", text: \"" + text.substring(0, Math.min(800, text.length())) + "\")";
     }
 
     public static JsonObject getJsonPostResponse(@Nonnull final String endpoint,
@@ -2158,6 +2221,10 @@ YoutubeParsingHelper {
                 if (alertText != null && alertText.contains("siteshi kasitholakali")) {
                     throw new ContentNotAvailableException(
                             "Got error: \"This channel is unavailable.\"");
+                }
+                if (alertText != null && alertText.contains("siteshi asikho")) {
+                    throw new ContentNotAvailableException(
+                            "Got error: \"This channel does not exist.\"");
                 }
                 if (alertText != null
                         && (alertText.contains("This account has been terminated")
