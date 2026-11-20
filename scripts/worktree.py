@@ -555,23 +555,10 @@ def remove_worktree_dir(repo_root: Path, wt_path: Path) -> int:
         )
         subprocess.run(["git", "worktree", "prune"], cwd=repo_root, check=True)
 
-        # Clean up empty parent directories inside .worktrees/ if applicable.
-        worktrees_dir = (repo_root / ".worktrees").resolve()
-        try:
-            wt_path.relative_to(worktrees_dir)
-            curr = wt_path.parent
-            while curr != worktrees_dir and curr != repo_root and curr.is_dir():
-                try:
-                    curr.rmdir()
-                except OSError:
-                    break
-                curr = curr.parent
-            try:
-                worktrees_dir.rmdir()
-            except OSError:
-                pass
-        except ValueError:
-            pass
+        # Sweep leftover empty dirs under .worktrees/ so `remove` matches
+        # `cleanup`: the removed worktree's empty ancestors, sibling empties,
+        # and stray chains (e.g. Gradle residue) all go, non-empty dirs stay.
+        sweep_empty_worktrees_dir(repo_root)
         return 0
     except subprocess.CalledProcessError as e:
         return e.returncode
