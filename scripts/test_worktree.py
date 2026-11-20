@@ -476,6 +476,32 @@ class TestWorktreeCleanup(TempRepoTestBase):
         self.assertFalse(os.path.isdir(os.path.join(self.repo_str, ".worktrees")))
         self.assertFalse(self._branch_exists("feature/sweep"))
 
+    def test_remove_sweeps_stray_and_sibling_empty_dirs(self):
+        self._commit_on_branch("feature/rm-sweep", "feat.txt", "merged\n", "feat")
+        subprocess.run(["git", "-C", self.repo_dir, "merge", "--no-ff", "feature/rm-sweep", "-m", "merge"], check=True, stdout=subprocess.DEVNULL)
+        wt = self._add_worktree("feature/rm-sweep")
+        # Simulate Gradle residue plus an empty sibling next to the removed
+        # worktree's parent: `remove` must sweep both like `cleanup` does.
+        os.makedirs(os.path.join(self.repo_str, ".worktrees", "stray", "a", "b"))
+        os.makedirs(os.path.join(self.repo_str, ".worktrees", "feature", "sibling-empty"))
+        # A non-empty sibling must survive the sweep.
+        keep_file = os.path.join(self.repo_str, ".worktrees", "keep", "data.txt")
+        os.makedirs(os.path.dirname(keep_file))
+        with open(keep_file, "w", encoding="utf-8") as f:
+            f.write("keep\n")
+        proc = subprocess.run(
+            [SCRIPT_PATH, "remove", "feature/rm-sweep"],
+            cwd=self.repo_dir,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr)
+        self.assertFalse(os.path.isdir(wt))
+        self.assertFalse(os.path.isdir(os.path.join(self.repo_str, ".worktrees", "stray")))
+        self.assertFalse(os.path.isdir(os.path.join(self.repo_str, ".worktrees", "feature", "sibling-empty")))
+        self.assertTrue(os.path.isfile(keep_file))
+        self.assertTrue(os.path.isdir(os.path.join(self.repo_str, ".worktrees")))
+        self.assertFalse(self._branch_exists("feature/rm-sweep"))
+
     def test_command_aliases_ls_and_rm(self):
         proc_ls = subprocess.run(
             [SCRIPT_PATH, "ls"],

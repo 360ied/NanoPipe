@@ -21,6 +21,10 @@ The shell provides everything needed — no system JDK, Gradle, or Android SDK r
 Gradle state stays inside the repo: `GRADLE_USER_HOME` points at
 `./.gradle-home` (gitignored). Do not use or rely on `~/.gradle`.
 
+Never search, glob, or grep `/nix/store/` for tools or binaries. Use
+`nix develop --command <tool> <args>`, `nix run nixpkgs#<pkg> -- <args>` as a
+stopgap, or add the tool to `flake.nix`.
+
 ## Building
 
 ```sh
@@ -69,8 +73,11 @@ Always use the Gradle wrapper (`./gradlew`); never a system `gradle`.
 other automation runs these gates; enforcement is manual — running
 `./scripts/check.sh` before completing a code task is the gate.
 - **Pre-Completion Check**: Run `./scripts/check.sh` inside the dedicated worktree before completing any code task. Passing verification signifies that the branch is ready for user review — it does NOT trigger or authorize merging into `main`. Standalone documentation-only changes (committed on `main`) are exempt from `./scripts/check.sh`.
-- **Gate**: Python unit tests for `scripts/` plus `assembleDebug` and `testDebugUnitTest` (`-DskipFormatKtlint`) in `PipePipeClient/`:
-  `nix develop --command ./gradlew assembleDebug testDebugUnitTest --stacktrace -DskipFormatKtlint` (run from `PipePipeClient/` inside the worktree).
+- **Gate**: `./scripts/check.sh` re-execs itself under `nix develop` once for
+the whole run (Python tests and Gradle share one dev shell, and the script
+`cd`s to the repository root first, so it can be invoked from any directory).
+It runs the Python unit tests for `scripts/` plus `assembleDebug` and
+`testDebugUnitTest` (`-DskipFormatKtlint`) in `PipePipeClient/`.
 - **No lint in the gate (by design)**: lint reports hundreds of open findings and enforces nothing (`abortOnError false`), so gating on it buys only minutes. The `lint {}` block in `app/build.gradle` stays solely to keep lint out of release builds.
 
 ## Versioning
@@ -95,6 +102,18 @@ other automation runs these gates; enforcement is manual — running
   capped at 98). `-dirty` and describe distance do not affect the code.
   Checkouts with no version info fall back to the `111000` sentinel;
   tag-shaped but non-semver tags fail the build.
+
+## Documentation
+
+- **Markdown (GFM)**: Target GitHub Flavored Markdown.
+  - **Portable Links**: Use relative Markdown links for in-tree files
+    (e.g., `../scripts/check.sh`) and canonical web URLs for upstream
+    references — never `file:///` URIs or local machine paths.
+  - **Math**: Use blank-line-isolated ```` ```math ```` blocks (not
+    `$$ ... $$`; indent inside list items so numbering isn't split) and
+    `$x$` without internal padding for inline math.
+  - **Fenced Code**: Always tag the language (`sh`, `bash`, `python`, `text`)
+    so rendering and copy-paste behave predictably.
 
 ## Code Review
 
