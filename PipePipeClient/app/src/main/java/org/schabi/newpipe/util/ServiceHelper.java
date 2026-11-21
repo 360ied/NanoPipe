@@ -233,7 +233,6 @@ public final class ServiceHelper {
             ServiceList.YouTube.setAudioLanguage(audioLanguage);
             ServiceList.YouTube.setShowAutoTranslatedSubtitles(showAutoTranslatedSubtitles);
             ServiceList.YouTube.setAutoTranslatedSubtitlesLanguage(autoTranslatedSubtitlesLanguage);
-            ServiceList.YouTube.setAdditionalTokens(null);
         }
     }
 

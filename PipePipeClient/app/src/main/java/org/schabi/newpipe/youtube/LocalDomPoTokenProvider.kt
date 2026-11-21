@@ -16,7 +16,11 @@ import java.util.concurrent.ExecutionException
 import java.util.concurrent.Executors
 import java.util.concurrent.FutureTask
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
+
+/** A player PO token together with the generation of the minter that produced it. */
+class MintedPlayerPoToken(val token: ByteArray, val generation: Long)
 
 object LocalDomPoTokenProvider {
     private lateinit var appContext: Context
@@ -26,6 +30,11 @@ object LocalDomPoTokenProvider {
     private val initializationLock = Any()
     @Volatile
     private var initializationTask: FutureTask<MintState>? = null
+    private val generationCounter = AtomicLong()
+    private val mintedTokenGenerations = object : LinkedHashMap<String, Long>() {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Long>): Boolean =
+            size > MAX_TRACKED_TOKENS
+    }
 
     fun warmUp() {
         ensureInitializationTask()
@@ -33,6 +42,34 @@ object LocalDomPoTokenProvider {
 
     fun getPlayerPoToken(videoId: String): YoutubePoTokenResult {
         val state = getState()
+        return YoutubePoTokenResult(
+            state.bootstrap.visitorData,
+            state.bootstrap.clientVersion,
+            encodeToken(mint(state, videoId)),
+        )
+    }
+
+    fun mintPlayerPoToken(videoId: String): MintedPlayerPoToken {
+        val state = getState()
+        return MintedPlayerPoToken(mint(state, videoId), state.generation)
+    }
+
+    /** Generation of the minter that produced [token], or null when it was not minted recently. */
+    fun generationOf(token: ByteArray): Long? {
+        val key = encodeToken(token)
+        return synchronized(mintedTokenGenerations) { mintedTokenGenerations[key] }
+    }
+
+    fun invalidate() {
+        invalidateMatching(null)
+    }
+
+    /** Replaces the minter only if it is still the one of [generation]. */
+    fun invalidate(generation: Long) {
+        invalidateMatching(generation)
+    }
+
+    private fun mint(state: MintState, videoId: String): ByteArray {
         val token = when (state.bootstrap.binding) {
             YoutubePoTokenBinding.CONTENT -> state.session.mint(videoId)
             YoutubePoTokenBinding.SESSION -> requireNotNull(state.sessionPoToken).clone()
@@ -40,14 +77,17 @@ object LocalDomPoTokenProvider {
                 "YouTube home does not enable a supported PO token binding",
             )
         }
-        return YoutubePoTokenResult(
-            state.bootstrap.visitorData,
-            state.bootstrap.clientVersion,
-            Base64.getUrlEncoder().withoutPadding().encodeToString(token),
-        )
+        val key = encodeToken(token)
+        synchronized(mintedTokenGenerations) {
+            mintedTokenGenerations[key] = state.generation
+        }
+        return token
     }
 
-    fun invalidate() {
+    private fun encodeToken(token: ByteArray): String =
+        Base64.getUrlEncoder().withoutPadding().encodeToString(token)
+
+    private fun invalidateMatching(generation: Long?) {
         val sessionToClose: PersistentMintSession
         synchronized(initializationLock) {
             val task = initializationTask ?: return
@@ -57,6 +97,7 @@ object LocalDomPoTokenProvider {
             } catch (_: Exception) {
                 return
             }
+            if (generation != null && state.generation != generation) return
             initializationTask = null
             sessionToClose = state.session
         }
@@ -125,7 +166,12 @@ object LocalDomPoTokenProvider {
                             "version=${bootstrap.clientVersion} " +
                             "binding=${bootstrap.binding}",
                     )
-                    MintState(bootstrap, session, sessionPoToken)
+                    MintState(
+                        bootstrap,
+                        session,
+                        sessionPoToken,
+                        generationCounter.incrementAndGet(),
+                    )
                 } catch (error: Throwable) {
                     session.close()
                     throw error
@@ -145,7 +191,7 @@ object LocalDomPoTokenProvider {
             mapOf(
                 "Accept-Language" to listOf("en-US"),
                 "Cookie" to listOf(ANONYMOUS_COOKIE),
-                "User-Agent" to listOf(SharedWebViewRuntime.USER_AGENT),
+                "User-Agent" to listOf(SharedWebViewRuntime.getUserAgent(appContext)),
             ),
         )
         if (response.responseCode() != 200) {
@@ -160,6 +206,7 @@ object LocalDomPoTokenProvider {
         val bootstrap: YoutubePageAttestationBootstrap,
         val session: PersistentMintSession,
         val sessionPoToken: ByteArray?,
+        val generation: Long,
     )
 
     @JvmStatic
@@ -173,8 +220,11 @@ object LocalDomPoTokenProvider {
     }
 
     private const val TAG = "YoutubeGlobalPoToken"
-    private const val YOUTUBE_HOME = "https://www.youtube.com"
-    private const val ANONYMOUS_COOKIE = "PREF=hl=en&gl=US"
+    private const val MAX_TRACKED_TOKENS = 64
+
+    // The WebView user agent is mobile; app=desktop keeps the WEB home and its WEB attestation.
+    private const val YOUTUBE_HOME = "https://www.youtube.com/?app=desktop&persist_app=1"
+    private const val ANONYMOUS_COOKIE = "PREF=hl=en&gl=US&app=desktop"
 }
 
 private class PersistentMintSession private constructor(
@@ -183,6 +233,7 @@ private class PersistentMintSession private constructor(
     private val bootstrap: YoutubePageAttestationBootstrap,
 ) : Closeable {
     private val runtime = SharedWebViewRuntime.get(context.applicationContext)
+    private val userAgent = SharedWebViewRuntime.getUserAgent(context)
     private val sessionId = runtime.registerSabrLocalDomCallbacks(Callbacks())
     private val tokenWaiters = mutableMapOf<String, TokenWaiter>()
     @Volatile
@@ -285,7 +336,7 @@ private class PersistentMintSession private constructor(
                 val response = downloader.post(
                     url,
                     mapOf(
-                        "User-Agent" to listOf(SharedWebViewRuntime.USER_AGENT),
+                        "User-Agent" to listOf(userAgent),
                         "Accept" to listOf("application/json"),
                         "Content-Type" to listOf(contentType),
                         "x-goog-api-key" to listOf(LOCAL_DOM_GOOGLE_API_KEY),
@@ -317,7 +368,7 @@ private class PersistentMintSession private constructor(
                 val response = downloader.get(
                     url,
                     mapOf(
-                        "User-Agent" to listOf(SharedWebViewRuntime.USER_AGENT),
+                        "User-Agent" to listOf(userAgent),
                         "Accept" to listOf("*/*"),
                     ),
                 )

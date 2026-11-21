@@ -679,7 +679,6 @@ public final class VideoDetailFragment
                                 getContext(),
                                 currentInfo.getRelatedItems().stream()
                                         .filter(x -> x instanceof StreamInfoItem)
-                                        .filter(x -> ((StreamInfoItem) x).getUploaderName() != null)
                                         .map(x -> new StreamEntity((StreamInfoItem)x))
                                         .collect(Collectors.toList()),
                                 dialog -> dialog.show(getFM(), TAG)

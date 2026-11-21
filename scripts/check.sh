@@ -16,8 +16,9 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT_PATH="$ROOT_DIR/scripts/$(basename "${BASH_SOURCE[0]}")"
 cd "$ROOT_DIR"
 
-# No flags: there is a single gate (assemble + unit tests). Old --quick/--full
-# invocations are accepted and ignored so muscle memory keeps working.
+# No flags: there is a single gate (assemble, androidTest assemble, unit
+# tests). Old --quick/--full invocations are accepted and ignored so muscle
+# memory keeps working.
 
 echo "========================================"
 echo " 1. Checking Git Branch"
@@ -65,8 +66,12 @@ echo "========================================"
 # separate Gradle build that check.sh does not cover). GRADLE_USER_HOME is
 # resolved from the git common dir by the flake shellHook, so worktrees share
 # the root repository's cache.
-echo "Running verification (assemble + unit tests)..."
-(cd "$ROOT_DIR/PipePipeClient" && ./gradlew assembleDebug testDebugUnitTest --stacktrace -DskipFormatKtlint)
+echo "Running verification (assemble + androidTest assemble + unit tests)..."
+# assembleDebugAndroidTest only builds the instrumentation test APK; running it
+# would need a device or emulator, so it stays a compile-time check that keeps
+# app/src/androidTest from rotting unnoticed.
+(cd "$ROOT_DIR/PipePipeClient" && ./gradlew assembleDebug assembleDebugAndroidTest \
+  testDebugUnitTest --stacktrace -DskipFormatKtlint)
 
 echo ""
 echo "========================================"
