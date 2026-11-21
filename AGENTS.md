@@ -76,8 +76,10 @@ other automation runs these gates; enforcement is manual — running
 - **Gate**: `./scripts/check.sh` re-execs itself under `nix develop` once for
 the whole run (Python tests and Gradle share one dev shell, and the script
 `cd`s to the repository root first, so it can be invoked from any directory).
-It runs the Python unit tests for `scripts/` plus `assembleDebug` and
-`testDebugUnitTest` (`-DskipFormatKtlint`) in `PipePipeClient/`.
+It runs the Python unit tests for `scripts/` plus `assembleDebug`,
+`assembleDebugAndroidTest` and `testDebugUnitTest` (`-DskipFormatKtlint`) in
+`PipePipeClient/`. The instrumentation tests under `app/src/androidTest` are
+compiled but not executed: running them needs a device or emulator.
 - **No lint in the gate (by design)**: lint reports hundreds of open findings and enforces nothing (`abortOnError false`), so gating on it buys only minutes. The `lint {}` block in `app/build.gradle` stays solely to keep lint out of release builds.
 
 ## Versioning
