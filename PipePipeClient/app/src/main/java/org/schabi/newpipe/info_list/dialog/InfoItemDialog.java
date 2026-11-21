@@ -1,5 +1,6 @@
 package org.schabi.newpipe.info_list.dialog;
 
+import static android.text.TextUtils.isEmpty;
 import static org.schabi.newpipe.MainActivity.DEBUG;
 
 import android.app.Activity;
@@ -61,7 +62,7 @@ public final class InfoItemDialog {
         titleView.setText(info.getName());
 
         final TextView detailsView = bannerView.findViewById(R.id.itemAdditionalDetails);
-        if (info.getUploaderName() != null) {
+        if (!isEmpty(info.getUploaderName())) {
             detailsView.setText(info.getUploaderName());
             detailsView.setVisibility(View.VISIBLE);
         } else {
